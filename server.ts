@@ -4,6 +4,9 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import { generateTimeframeSnapshot } from './src/utils/indicators';
+import { evaluateMarketSetup } from './src/utils/tradeValidator';
+import { IndicatorSnapshot, Timeframe, TickerData, MarketType } from './src/types/crypto';
 
 dotenv.config();
 
@@ -204,6 +207,263 @@ async function validateMarketSymbol(rawSymbol: string, targetMarket: 'spot' | 'f
     message: `Le symbole "${symbol}" est introuvable sur Binance (ni sur Spot, ni sur Futures). Aucun graphique ni cotation simulée.`,
   };
 }
+
+// In-memory klines cache to avoid hitting Binance rate limits during scans
+const scannerKlinesCache = new Map<string, { timestamp: number; klines: any[] }>();
+
+async function fetchKlinesForScanner(
+  symbol: string,
+  market: 'spot' | 'futures',
+  interval: string,
+  limit: number = 70
+): Promise<any[]> {
+  const cacheKey = `${market}:${symbol}:${interval}:${limit}`;
+  const now = Date.now();
+  const cached = scannerKlinesCache.get(cacheKey);
+  if (cached && now - cached.timestamp < 60000) {
+    return cached.klines;
+  }
+
+  const endpoint = market === 'futures'
+    ? `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
+    : `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    const resp = await fetch(endpoint, {
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' },
+    });
+    clearTimeout(timeout);
+
+    if (resp.ok) {
+      const raw = await resp.json();
+      if (Array.isArray(raw)) {
+        const klines = raw.map((k: any) => ({
+          time: Math.floor(k[0] / 1000),
+          open: parseFloat(k[1]),
+          high: parseFloat(k[2]),
+          low: parseFloat(k[3]),
+          close: parseFloat(k[4]),
+          volume: parseFloat(k[5]),
+        }));
+        scannerKlinesCache.set(cacheKey, { timestamp: now, klines });
+        return klines;
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[Scanner Klines] Erreur ${symbol} ${interval}:`, err?.message);
+  }
+  return [];
+}
+
+const scannerTickersCache: {
+  spot?: { timestamp: number; data: any[] };
+  futures?: { timestamp: number; data: any[] };
+} = {};
+
+// API: Scanner Tickers (Top liquid pairs from Binance)
+app.get('/api/market/scanner-tickers', async (req, res) => {
+  const market = (req.query.market as string) === 'futures' ? 'futures' : 'spot';
+  const minVolume = parseFloat(req.query.minVolume as string) || (market === 'futures' ? 5000000 : 1000000);
+  const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 30, 5), 100);
+  const now = Date.now();
+
+  const cached = scannerTickersCache[market];
+  if (cached && now - cached.timestamp < 30000) {
+    return res.json({
+      market,
+      timestamp: cached.timestamp,
+      tickers: cached.data.slice(0, limit),
+      totalAvailable: cached.data.length,
+    });
+  }
+
+  const endpoint = market === 'futures'
+    ? 'https://fapi.binance.com/fapi/v1/ticker/24hr'
+    : 'https://api.binance.com/api/v3/ticker/24hr';
+
+  try {
+    const [tickerResp, exchangeMap] = await Promise.all([
+      fetch(endpoint, { headers: { 'Accept': 'application/json' } }),
+      getExchangeInfo(market),
+    ]);
+
+    if (!tickerResp.ok) {
+      return res.status(502).json({ error: 'Impossible de récupérer les tickers 24h Binance' });
+    }
+
+    const rawList = await tickerResp.json();
+    if (!Array.isArray(rawList)) {
+      return res.status(502).json({ error: 'Format invalide de réponse Binance' });
+    }
+
+    const validTickers: any[] = [];
+    for (const item of rawList) {
+      const sym = item.symbol;
+      if (!sym || !sym.endsWith('USDT')) continue;
+
+      const filterInfo = exchangeMap.get(sym);
+      if (!filterInfo || !filterInfo.isTrading) continue;
+
+      const lastPrice = parseFloat(item.lastPrice || item.c);
+      const quoteVolume = parseFloat(item.quoteVolume || item.q);
+      const volume = parseFloat(item.volume || item.v);
+      const change24h = parseFloat(item.priceChangePercent || item.P) || 0;
+      const high24h = parseFloat(item.highPrice || item.h) || lastPrice;
+      const low24h = parseFloat(item.lowPrice || item.l) || lastPrice;
+
+      if (isNaN(lastPrice) || lastPrice <= 0 || isNaN(quoteVolume) || quoteVolume < minVolume) {
+        continue;
+      }
+
+      validTickers.push({
+        symbol: sym,
+        market,
+        price: lastPrice,
+        change24h,
+        high24h,
+        low24h,
+        volume24h: volume,
+        quoteVolume24h: quoteVolume,
+        tickSize: filterInfo.tickSize,
+        pricePrecision: filterInfo.pricePrecision,
+      });
+    }
+
+    // Sort descending by 24h quoteVolume (highest liquidity first)
+    validTickers.sort((a, b) => b.quoteVolume24h - a.quoteVolume24h);
+
+    scannerTickersCache[market] = {
+      timestamp: now,
+      data: validTickers,
+    };
+
+    return res.json({
+      market,
+      timestamp: now,
+      tickers: validTickers.slice(0, limit),
+      totalAvailable: validTickers.length,
+    });
+  } catch (err: any) {
+    console.error('[Scanner Tickers] Erreur:', err);
+    return res.status(500).json({ error: err?.message || 'Erreur interne scanner' });
+  }
+});
+
+// API: Scanner Analyze Pair (Deep multi-timeframe analysis for a candidate)
+app.get('/api/market/scanner-analyze-pair', async (req, res) => {
+  const symbol = ((req.query.symbol as string) || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const market = (req.query.market as string) === 'futures' ? 'futures' : 'spot';
+
+  if (!symbol) {
+    return res.status(400).json({ error: 'Symbole manquant.' });
+  }
+
+  const validation = await validateMarketSymbol(symbol, market);
+  if (!validation.isValidOnTarget) {
+    return res.status(404).json({
+      error: validation.message,
+      symbol,
+      market,
+      existsOnTarget: false,
+      alternativeMarket: validation.alternativeMarket,
+    });
+  }
+
+  try {
+    const tickerEndpoint = market === 'futures'
+      ? `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${symbol}`
+      : `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`;
+
+    const tickerResp = await fetch(tickerEndpoint, { headers: { 'Accept': 'application/json' } });
+    if (!tickerResp.ok) {
+      return res.status(502).json({ error: `Impossible de récupérer le ticker ${symbol}` });
+    }
+    const tickerJson = await tickerResp.json();
+    const lastPrice = parseFloat(tickerJson.lastPrice || tickerJson.c);
+    const quoteVolume = parseFloat(tickerJson.quoteVolume || tickerJson.q) || 0;
+    const volume = parseFloat(tickerJson.volume || tickerJson.v) || 0;
+    const change24h = parseFloat(tickerJson.priceChangePercent || tickerJson.P) || 0;
+    const high24h = parseFloat(tickerJson.highPrice || tickerJson.h) || lastPrice;
+    const low24h = parseFloat(tickerJson.lowPrice || tickerJson.l) || lastPrice;
+
+    const tickSize = validation.tickSize || (lastPrice < 0.1 ? 0.00001 : lastPrice < 1 ? 0.0001 : 0.01);
+    const pricePrecision = validation.pricePrecision || (lastPrice < 0.1 ? 5 : lastPrice < 1 ? 4 : 2);
+
+    const tickerData: TickerData = {
+      symbol,
+      market,
+      price: lastPrice,
+      change24h,
+      change24hAmount: parseFloat(tickerJson.priceChange || tickerJson.p) || 0,
+      high24h,
+      low24h,
+      volume24h: volume,
+      quoteVolume24h: quoteVolume,
+      timestamp: tickerJson.closeTime || Date.now(),
+      isLive: true,
+      source: market === 'futures' ? 'Binance USDⓈ-M Futures' : 'Binance Spot',
+      tickSize,
+      pricePrecision,
+      stalenessSeconds: 0,
+      isStale: false,
+    };
+
+    // Parallel fetch for 4H, 1H, 15M, 5M klines
+    const [k4h, k1h, k15m, k5m] = await Promise.all([
+      fetchKlinesForScanner(symbol, market, '4h', 70),
+      fetchKlinesForScanner(symbol, market, '1h', 70),
+      fetchKlinesForScanner(symbol, market, '15m', 70),
+      fetchKlinesForScanner(symbol, market, '5m', 70),
+    ]);
+
+    const snap4h = generateTimeframeSnapshot(k4h, '4h');
+    const snap1h = generateTimeframeSnapshot(k1h, '1h');
+    const snap15m = generateTimeframeSnapshot(k15m, '15m');
+    const snap5m = generateTimeframeSnapshot(k5m, '5m');
+
+    const evaluation = evaluateMarketSetup({
+      symbol,
+      market,
+      currentPrice: lastPrice,
+      ticker: tickerData,
+      timeframe4h: snap4h,
+      timeframe1h: snap1h,
+      timeframe15m: snap15m,
+      timeframe5m: snap5m,
+      userRiskPercent: 1.0,
+    });
+
+    return res.json({
+      symbol,
+      market,
+      currentPrice: lastPrice,
+      change24h,
+      volume24h: volume,
+      quoteVolume24h: quoteVolume,
+      tickSize,
+      pricePrecision,
+      outcome: evaluation.outcome,
+      qualityScore: evaluation.qualityScore,
+      setup: evaluation.setup,
+      checklist: evaluation.checklist,
+      noTradeReasons: evaluation.noTradeReasons,
+      executiveSummary: evaluation.executiveSummary,
+      timestamp: Date.now(),
+      snapshots: {
+        '4h': snap4h,
+        '1h': snap1h,
+        '15m': snap15m,
+        '5m': snap5m,
+      },
+    });
+  } catch (err: any) {
+    console.error(`[Scanner Analysis] Erreur sur ${symbol}:`, err);
+    return res.status(500).json({ error: err?.message || 'Erreur analyse pair' });
+  }
+});
 
 // API: Validate Symbol and Check Cross-Market Availability
 app.get('/api/market/validate-symbol', async (req, res) => {

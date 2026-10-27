@@ -22,6 +22,7 @@ import { TradeSetupCard } from './components/TradeSetupCard';
 import { ChartVisionUploader } from './components/ChartVisionUploader';
 import { RiskCalculator } from './components/RiskCalculator';
 import { BacktestModule } from './components/BacktestModule';
+import { MarketScanner } from './components/MarketScanner';
 import { AnalysisHistoryModal } from './components/AnalysisHistoryModal';
 import {
   Search,
@@ -41,6 +42,7 @@ import {
   ChevronRight,
   Wifi,
   WifiOff,
+  Radar,
 } from 'lucide-react';
 
 const POPULAR_PAIRS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT', 'AVAXUSDT', 'SUIUSDT'];
@@ -49,7 +51,7 @@ export default function App() {
   const [symbol, setSymbol] = useState<string>('BTCUSDT');
   const [searchInput, setSearchInput] = useState<string>('BTCUSDT');
   const [market, setMarket] = useState<MarketType>('futures');
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'vision' | 'calculator' | 'backtest'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'scanner' | 'vision' | 'calculator' | 'backtest'>('dashboard');
 
   // Real-time high-frequency WebSocket + REST stream with mobile lifecycle & race condition guards
   const {
@@ -324,6 +326,7 @@ export default function App() {
             } else {
               const rrTP1 = calculateRiskRewardRatios(aiOutcome, qEntry, qSL, qTP1, frictionPct);
               const rrTP2 = calculateRiskRewardRatios(aiOutcome, qEntry, qSL, qTP2, frictionPct);
+              const rrTP3 = qTP3 !== undefined ? calculateRiskRewardRatios(aiOutcome, qEntry, qSL, qTP3, frictionPct) : undefined;
 
               if (!rrTP1.isValid || rrTP1.grossRR < 1.3 || rrTP1.netRR < 1.0) {
                 aiOutcome = 'NO_TRADE';
@@ -342,10 +345,16 @@ export default function App() {
                   ...(qTP3 !== undefined ? { takeProfit3: qTP3 } : {}),
                   riskRewardRatioTP1: parseFloat(rrTP1.grossRR.toFixed(2)),
                   riskRewardRatioTP2: parseFloat(rrTP2.grossRR.toFixed(2)),
+                  ...(rrTP3?.isValid ? { riskRewardRatioTP3: parseFloat(rrTP3.grossRR.toFixed(2)) } : {}),
                   netRiskRewardRatioTP1: parseFloat(rrTP1.netRR.toFixed(2)),
                   netRiskRewardRatioTP2: parseFloat(rrTP2.netRR.toFixed(2)),
+                  ...(rrTP3?.isValid ? { netRiskRewardRatioTP3: parseFloat(rrTP3.netRR.toFixed(2)) } : {}),
                   grossGainPercentTP1: parseFloat(rrTP1.grossGainPct.toFixed(2)),
                   netGainPercentTP1: parseFloat(rrTP1.netGainPct.toFixed(2)),
+                  grossGainPercentTP2: parseFloat(rrTP2.grossGainPct.toFixed(2)),
+                  netGainPercentTP2: parseFloat(rrTP2.netGainPct.toFixed(2)),
+                  ...(rrTP3?.isValid ? { grossGainPercentTP3: parseFloat(rrTP3.grossGainPct.toFixed(2)) } : {}),
+                  ...(rrTP3?.isValid ? { netGainPercentTP3: parseFloat(rrTP3.netGainPct.toFixed(2)) } : {}),
                   riskPercent: parseFloat(rrTP1.riskPct.toFixed(2)),
                   tickSize: tick,
                   suggestedRiskPercent: v.setup.suggestedRiskPercent || 1.0,
@@ -466,6 +475,13 @@ export default function App() {
     setMarket(item.market);
     setActiveTab('dashboard');
   };
+
+  const handleSelectFromScanner = useCallback((selectedSymbol: string, targetMarket: MarketType) => {
+    setMarket(targetMarket);
+    setSymbol(selectedSymbol);
+    setSearchInput(selectedSymbol);
+    setActiveTab('dashboard');
+  }, []);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-blue-600 selection:text-white">
@@ -709,6 +725,21 @@ export default function App() {
             </button>
 
             <button
+              onClick={() => setActiveTab('scanner')}
+              className={`py-3 px-3 border-b-2 flex items-center gap-2 transition-colors ${
+                activeTab === 'scanner'
+                  ? 'border-blue-500 text-blue-400 font-semibold'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Radar className="w-4 h-4 text-cyan-400 animate-pulse" />
+              <span>Scanner IA</span>
+              <span className="px-1.5 py-0.2 rounded text-[9px] font-semibold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-mono">
+                PRO
+              </span>
+            </button>
+
+            <button
               onClick={() => setActiveTab('vision')}
               className={`py-3 px-3 border-b-2 flex items-center gap-2 transition-colors ${
                 activeTab === 'vision'
@@ -838,6 +869,16 @@ export default function App() {
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* Tab: Intelligent Market Scanner */}
+        {activeTab === 'scanner' && (
+          <div className="space-y-5">
+            <MarketScanner
+              currentMarket={market}
+              onSelectPair={handleSelectFromScanner}
+            />
           </div>
         )}
 

@@ -162,7 +162,7 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
     noTradeReasons.push(`La paire ${symbol} n'a pas pu être validée sur l'API publique Binance (${market}).`);
   }
 
-  // 3. Higher-Timeframe (HTF: 4H / 1H) Trend Alignment
+  // 3. Higher-Timeframe (HTF: 4H / 1H) Trend Alignment & MTF Confluence
   const htfTrend = timeframe4h?.trend || timeframe1h?.trend || 'CONSOLIDATION';
   const htfStructure = timeframe4h?.structure || timeframe1h?.structure || 'NEUTRAL';
   const ltfTrend = timeframe15m?.trend || timeframe5m?.trend || 'CONSOLIDATION';
@@ -170,19 +170,33 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
   const isBullishHTF = htfTrend === 'HAUSSIÈRE' && htfStructure === 'BULLISH_STRUCTURE';
   const isBearishHTF = htfTrend === 'BAISSIÈRE' && htfStructure === 'BEARISH_STRUCTURE';
   const isHTFConsolidating = htfTrend === 'CONSOLIDATION';
+  
+  // MTF Divergence guards across 4H, 1H, 15M, and 5M
   const isOpposingTrend = (timeframe4h?.trend === 'HAUSSIÈRE' && timeframe1h?.trend === 'BAISSIÈRE') ||
-                          (timeframe4h?.trend === 'BAISSIÈRE' && timeframe1h?.trend === 'HAUSSIÈRE');
+                          (timeframe4h?.trend === 'BAISSIÈRE' && timeframe1h?.trend === 'HAUSSIÈRE') ||
+                          (timeframe4h?.trend === 'BAISSIÈRE' && ltfTrend === 'HAUSSIÈRE' && !timeframe15m?.changeOfCharacterDetected && !timeframe15m?.liquiditySweepDetected) ||
+                          (timeframe4h?.trend === 'HAUSSIÈRE' && ltfTrend === 'BAISSIÈRE' && !timeframe15m?.changeOfCharacterDetected && !timeframe15m?.liquiditySweepDetected);
+
+  const isInsufficientCandles =
+    (timeframe4h && timeframe4h.candleCount < 20) ||
+    (timeframe1h && timeframe1h.candleCount < 20) ||
+    (timeframe15m && timeframe15m.candleCount < 20);
 
   checklist.push({
     id: 'check-3',
-    label: 'Alignement de la tendance supérieure (HTF 4H/1H)',
-    status: (isBullishHTF || isBearishHTF) && !isOpposingTrend ? 'PASSED' : isOpposingTrend ? 'FAILED' : 'WARNING',
-    comment: isOpposingTrend
-      ? `Conflit de tendance majeur : 4H est ${timeframe4h?.trend} alors que 1H est ${timeframe1h?.trend}.`
-      : `Tendance HTF : ${htfTrend} (${htfStructure}).`,
+    label: 'Alignement de la tendance supérieure (HTF 4H/1H & MTF)',
+    status: (isBullishHTF || isBearishHTF) && !isOpposingTrend && !isInsufficientCandles ? 'PASSED' : (isOpposingTrend || isInsufficientCandles) ? 'FAILED' : 'WARNING',
+    comment: isInsufficientCandles
+      ? 'Historique de chandeliers insuffisant (< 20 bougies) pour un calcul fiable.'
+      : isOpposingTrend
+      ? `Conflit de tendance majeur : 4H est ${timeframe4h?.trend || 'N/A'}, 1H est ${timeframe1h?.trend || 'N/A'}, 15M est ${timeframe15m?.trend || 'N/A'}.`
+      : `Tendance HTF alignée : ${htfTrend} (${htfStructure}).`,
   });
   if (isOpposingTrend) {
-    noTradeReasons.push('Divergence directionnelle majeure entre les unités 4H et 1H.');
+    noTradeReasons.push('Divergence directionnelle majeure entre les unités 4H, 1H et 15M sans confirmation de retournement (CHoCH/Sweep).');
+  }
+  if (isInsufficientCandles) {
+    noTradeReasons.push('Historique de chandeliers insuffisant (< 20 bougies) pour garantir la fiabilité des indicateurs.');
   }
 
   // 4. Technical Entry Justification (SMC: Order Block, FVG, or Liquidity Sweep)
@@ -275,13 +289,15 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
   // Decide preliminary bias
   let bias: 'LONG' | 'SHORT' | 'NO_TRADE' = 'NO_TRADE';
 
-  if (isBullishHTF && !conflictingLong && !isOpposingTrend && isDataFresh && !isIlliquid) {
+  if (isBullishHTF && !conflictingLong && !isOpposingTrend && !isInsufficientCandles && isDataFresh && !isIlliquid) {
     bias = 'LONG';
-  } else if (isBearishHTF && !conflictingShort && !isOpposingTrend && isDataFresh && !isIlliquid) {
+  } else if (isBearishHTF && !conflictingShort && !isOpposingTrend && !isInsufficientCandles && isDataFresh && !isIlliquid) {
     bias = 'SHORT';
   } else if (isHTFConsolidating) {
     bias = 'NO_TRADE';
     noTradeReasons.push('Le marché supérieur (4H/1H) est en phase de consolidation latérale sans flux directionnel affirmé.');
+  } else if (isInsufficientCandles) {
+    bias = 'NO_TRADE';
   }
 
   // Setup calculation with strict numerical precision and directional tickSize quantization
@@ -328,9 +344,10 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
       noTradeReasons.push(`Hiérarchie des prix invalide : ${hierarchyCheck.errorReason}`);
     }
 
-    // Calculate R/R ratios
+    // Calculate R/R ratios for TP1, TP2, TP3
     const rr1 = calculateRiskRewardRatios('LONG', alignedEntry, alignedSL, alignedTP1, frictionPercent);
     const rr2 = calculateRiskRewardRatios('LONG', alignedEntry, alignedSL, alignedTP2, frictionPercent);
+    const rr3 = calculateRiskRewardRatios('LONG', alignedEntry, alignedSL, alignedTP3, frictionPercent);
 
     const isGrossRrValid = rr1.isValid && rr1.grossRR >= 1.5;
     checklist.push({
@@ -338,11 +355,17 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
       label: 'Ratio Rendement / Risque brut (R/R brut >= 1.5:1 sur TP1)',
       status: isGrossRrValid ? 'PASSED' : 'FAILED',
       comment: isGrossRrValid
-        ? `R/R brut sur TP1 = ${rr1.grossRR.toFixed(2)}:1 (Gain: +${rr1.grossGainPct.toFixed(2)}%, Risque: -${rr1.riskPct.toFixed(2)}%). TP2 = ${rr2.grossRR.toFixed(2)}:1.`
-        : `R/R brut insuffisant sur TP1 (${rr1.grossRR.toFixed(2)}:1 < 1.5:1).`,
+        ? `R/R brut : TP1 = ${rr1.grossRR.toFixed(2)}:1 (+${rr1.grossGainPct.toFixed(2)}%), TP2 = ${rr2.grossRR.toFixed(2)}:1 (+${rr2.grossGainPct.toFixed(2)}%), TP3 = ${rr3.grossRR.toFixed(2)}:1 (+${rr3.grossGainPct.toFixed(2)}%). Risque: -${rr1.riskPct.toFixed(2)}%.`
+        : !rr1.isValid
+        ? `Ratio non calculable : ${rr1.errorReason || 'Paramètres de prix invalides'}.`
+        : `Ratio brut défavorable sur TP1 (${rr1.grossRR.toFixed(2)}:1 < 1.50:1). Risque disproportionné par rapport au premier objectif.`,
     });
     if (!isGrossRrValid) {
-      noTradeReasons.push(`Ratio brut sur TP1 (${rr1.grossRR.toFixed(2)}:1) inférieur au minimum syndical de 1.5:1.`);
+      noTradeReasons.push(
+        !rr1.isValid
+          ? `Ratio brut sur TP1 non calculable (${rr1.errorReason || 'Erreur géométrie des prix'}).`
+          : `Ratio brut défavorable sur TP1 (${rr1.grossRR.toFixed(2)}:1 < 1.50:1).`
+      );
     }
 
     // Fee & Net R/R check
@@ -352,11 +375,21 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
       label: 'Impact des frais et slippage sur le gain net (R/R net)',
       status: isNetRrValid ? 'PASSED' : 'FAILED',
       comment: isNetRrValid
-        ? `Frais estimés et slippage (${frictionPercent.toFixed(2)}%) déduits. R/R net réel : ${rr1.netRR.toFixed(2)}:1 (Gain net: +${rr1.netGainPct.toFixed(2)}%).`
-        : `Gain net absorbé ou insuffisant après déduction des frais de ${frictionPercent.toFixed(2)}% (R/R net: ${rr1.netRR.toFixed(2)}:1 < 1.2:1).`,
+        ? `Frais estimés et slippage (${frictionPercent.toFixed(2)}%) déduits. R/R net réel : TP1 = ${rr1.netRR.toFixed(2)}:1 (Net: +${rr1.netGainPct.toFixed(2)}%), TP2 = ${rr2.netRR.toFixed(2)}:1 (Net: +${rr2.netGainPct.toFixed(2)}%), TP3 = ${rr3.netRR.toFixed(2)}:1 (Net: +${rr3.netGainPct.toFixed(2)}%).`
+        : !rr1.isValid
+        ? 'Impact net non calculable faute de ratio brut valide.'
+        : rr1.netGainPct <= 0
+        ? `Gain net nul ou négatif : les frais et slippage (${frictionPercent.toFixed(2)}%) absorbent la totalité du gain potentiel sur TP1.`
+        : `Ratio net réel défavorable (${rr1.netRR.toFixed(2)}:1 < 1.20:1) après déduction des frais de courtage de ${frictionPercent.toFixed(2)}%.`,
     });
     if (!isNetRrValid) {
-      noTradeReasons.push(`Frais de courtage et slippage (${frictionPercent.toFixed(2)}%) excessifs : R/R net (${rr1.netRR.toFixed(2)}:1) inférieur à 1.2:1.`);
+      noTradeReasons.push(
+        !rr1.isValid
+          ? 'Impact net non calculable.'
+          : rr1.netGainPct <= 0
+          ? `Frais de courtage et slippage (${frictionPercent.toFixed(2)}%) supérieurs au gain brut sur TP1.`
+          : `Ratio net réel après friction (${rr1.netRR.toFixed(2)}:1) inférieur au minimum requis de 1.20:1.`
+      );
     }
 
     if (isSlDistanceValid && hierarchyCheck.isValid && isGrossRrValid && isNetRrValid) {
@@ -373,11 +406,29 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
         takeProfit3: alignedTP3,
         riskRewardRatioTP1: parseFloat(rr1.grossRR.toFixed(2)),
         riskRewardRatioTP2: parseFloat(rr2.grossRR.toFixed(2)),
+        riskRewardRatioTP3: parseFloat(rr3.grossRR.toFixed(2)),
         netRiskRewardRatioTP1: parseFloat(rr1.netRR.toFixed(2)),
         netRiskRewardRatioTP2: parseFloat(rr2.netRR.toFixed(2)),
+        netRiskRewardRatioTP3: parseFloat(rr3.netRR.toFixed(2)),
         grossGainPercentTP1: parseFloat(rr1.grossGainPct.toFixed(2)),
         netGainPercentTP1: parseFloat(rr1.netGainPct.toFixed(2)),
+        grossGainPercentTP2: parseFloat(rr2.grossGainPct.toFixed(2)),
+        netGainPercentTP2: parseFloat(rr2.netGainPct.toFixed(2)),
+        grossGainPercentTP3: parseFloat(rr3.grossGainPct.toFixed(2)),
+        netGainPercentTP3: parseFloat(rr3.netGainPct.toFixed(2)),
         riskPercent: parseFloat(rawRiskPct.toFixed(2)),
+        unitRisk: parseFloat(Math.abs(alignedEntry - alignedSL).toFixed(tickSize < 0.1 ? 6 : 2)),
+        unitGainTP1: parseFloat(Math.abs(alignedTP1 - alignedEntry).toFixed(tickSize < 0.1 ? 6 : 2)),
+        unitGainTP2: parseFloat(Math.abs(alignedTP2 - alignedEntry).toFixed(tickSize < 0.1 ? 6 : 2)),
+        unitGainTP3: alignedTP3 ? parseFloat(Math.abs(alignedTP3 - alignedEntry).toFixed(tickSize < 0.1 ? 6 : 2)) : undefined,
+        estimatedFeesPercent: market === 'futures' ? 0.08 : 0.20,
+        estimatedSlippagePercent: 0.05,
+        confirmedTimeframes: [
+          ...(timeframe4h?.trend === 'HAUSSIÈRE' ? ['4H'] : []),
+          ...(timeframe1h?.trend === 'HAUSSIÈRE' ? ['1H'] : []),
+          ...(timeframe15m?.trend === 'HAUSSIÈRE' ? ['15M'] : []),
+          ...(timeframe5m?.trend === 'HAUSSIÈRE' ? ['5M'] : []),
+        ],
         suggestedRiskPercent: userRisk,
         tickSize,
         keyConfluences: [
@@ -385,7 +436,7 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
           ob15m ? `Order Block haussier identifié à ${formatCryptoPrice(ob15m.bottom, tickSize)} - ${formatCryptoPrice(ob15m.top, tickSize)} USDT.` : `Rebond sur support dynamique EMA 20.`,
           `RSI modéré (${rsi15m.toFixed(1)}) sans surchauffe.`,
           `Volume 24h liquide (${(quoteVolume / 1000000).toFixed(1)}M USDT).`,
-          `R/R brut de ${rr1.grossRR.toFixed(2)}:1 et R/R net réel après friction de ${rr1.netRR.toFixed(2)}:1 sur TP1.`,
+          `R/R brut : TP1 (${rr1.grossRR.toFixed(2)}:1), TP2 (${rr2.grossRR.toFixed(2)}:1), TP3 (${rr3.grossRR.toFixed(2)}:1) | Net réel TP1 (${rr1.netRR.toFixed(2)}:1).`,
         ],
         mainRisks: [
           `Volatilité en cas de balayage sous le Stop Loss à ${formatCryptoPrice(alignedSL, tickSize)} USDT.`,
@@ -435,9 +486,10 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
       noTradeReasons.push(`Hiérarchie des prix invalide : ${hierarchyCheck.errorReason}`);
     }
 
-    // Calculate R/R ratios
+    // Calculate R/R ratios for TP1, TP2, TP3
     const rr1 = calculateRiskRewardRatios('SHORT', alignedEntry, alignedSL, alignedTP1, frictionPercent);
     const rr2 = calculateRiskRewardRatios('SHORT', alignedEntry, alignedSL, alignedTP2, frictionPercent);
+    const rr3 = calculateRiskRewardRatios('SHORT', alignedEntry, alignedSL, alignedTP3, frictionPercent);
 
     const isGrossRrValid = rr1.isValid && rr1.grossRR >= 1.5;
     checklist.push({
@@ -445,11 +497,17 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
       label: 'Ratio Rendement / Risque brut (R/R brut >= 1.5:1 sur TP1)',
       status: isGrossRrValid ? 'PASSED' : 'FAILED',
       comment: isGrossRrValid
-        ? `R/R brut sur TP1 = ${rr1.grossRR.toFixed(2)}:1 (Gain: +${rr1.grossGainPct.toFixed(2)}%, Risque: -${rr1.riskPct.toFixed(2)}%). TP2 = ${rr2.grossRR.toFixed(2)}:1.`
-        : `R/R brut insuffisant sur TP1 (${rr1.grossRR.toFixed(2)}:1 < 1.5:1).`,
+        ? `R/R brut : TP1 = ${rr1.grossRR.toFixed(2)}:1 (+${rr1.grossGainPct.toFixed(2)}%), TP2 = ${rr2.grossRR.toFixed(2)}:1 (+${rr2.grossGainPct.toFixed(2)}%), TP3 = ${rr3.grossRR.toFixed(2)}:1 (+${rr3.grossGainPct.toFixed(2)}%). Risque: -${rr1.riskPct.toFixed(2)}%.`
+        : !rr1.isValid
+        ? `Ratio non calculable : ${rr1.errorReason || 'Paramètres de prix invalides'}.`
+        : `Ratio brut défavorable sur TP1 (${rr1.grossRR.toFixed(2)}:1 < 1.50:1). Risque disproportionné par rapport au premier objectif.`,
     });
     if (!isGrossRrValid) {
-      noTradeReasons.push(`Ratio brut sur TP1 (${rr1.grossRR.toFixed(2)}:1) inférieur au minimum syndical de 1.5:1.`);
+      noTradeReasons.push(
+        !rr1.isValid
+          ? `Ratio brut sur TP1 non calculable (${rr1.errorReason || 'Erreur géométrie des prix'}).`
+          : `Ratio brut défavorable sur TP1 (${rr1.grossRR.toFixed(2)}:1 < 1.50:1).`
+      );
     }
 
     // Fee & Net R/R check
@@ -459,11 +517,21 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
       label: 'Impact des frais et slippage sur le gain net (R/R net)',
       status: isNetRrValid ? 'PASSED' : 'FAILED',
       comment: isNetRrValid
-        ? `Frais estimés et slippage (${frictionPercent.toFixed(2)}%) déduits. R/R net réel : ${rr1.netRR.toFixed(2)}:1 (Gain net: +${rr1.netGainPct.toFixed(2)}%).`
-        : `Gain net absorbé ou insuffisant après déduction des frais de ${frictionPercent.toFixed(2)}% (R/R net: ${rr1.netRR.toFixed(2)}:1 < 1.2:1).`,
+        ? `Frais estimés et slippage (${frictionPercent.toFixed(2)}%) déduits. R/R net réel : TP1 = ${rr1.netRR.toFixed(2)}:1 (Net: +${rr1.netGainPct.toFixed(2)}%), TP2 = ${rr2.netRR.toFixed(2)}:1 (Net: +${rr2.netGainPct.toFixed(2)}%), TP3 = ${rr3.netRR.toFixed(2)}:1 (Net: +${rr3.netGainPct.toFixed(2)}%).`
+        : !rr1.isValid
+        ? 'Impact net non calculable faute de ratio brut valide.'
+        : rr1.netGainPct <= 0
+        ? `Gain net nul ou négatif : les frais et slippage (${frictionPercent.toFixed(2)}%) absorbent la totalité du gain potentiel sur TP1.`
+        : `Ratio net réel défavorable (${rr1.netRR.toFixed(2)}:1 < 1.20:1) après déduction des frais de courtage de ${frictionPercent.toFixed(2)}%.`,
     });
     if (!isNetRrValid) {
-      noTradeReasons.push(`Frais de courtage et slippage (${frictionPercent.toFixed(2)}%) excessifs : R/R net (${rr1.netRR.toFixed(2)}:1) inférieur à 1.2:1.`);
+      noTradeReasons.push(
+        !rr1.isValid
+          ? 'Impact net non calculable.'
+          : rr1.netGainPct <= 0
+          ? `Frais de courtage et slippage (${frictionPercent.toFixed(2)}%) supérieurs au gain brut sur TP1.`
+          : `Ratio net réel après friction (${rr1.netRR.toFixed(2)}:1) inférieur au minimum requis de 1.20:1.`
+      );
     }
 
     if (isSlDistanceValid && hierarchyCheck.isValid && isGrossRrValid && isNetRrValid) {
@@ -480,10 +548,16 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
         takeProfit3: alignedTP3,
         riskRewardRatioTP1: parseFloat(rr1.grossRR.toFixed(2)),
         riskRewardRatioTP2: parseFloat(rr2.grossRR.toFixed(2)),
+        riskRewardRatioTP3: parseFloat(rr3.grossRR.toFixed(2)),
         netRiskRewardRatioTP1: parseFloat(rr1.netRR.toFixed(2)),
         netRiskRewardRatioTP2: parseFloat(rr2.netRR.toFixed(2)),
+        netRiskRewardRatioTP3: parseFloat(rr3.netRR.toFixed(2)),
         grossGainPercentTP1: parseFloat(rr1.grossGainPct.toFixed(2)),
         netGainPercentTP1: parseFloat(rr1.netGainPct.toFixed(2)),
+        grossGainPercentTP2: parseFloat(rr2.grossGainPct.toFixed(2)),
+        netGainPercentTP2: parseFloat(rr2.netGainPct.toFixed(2)),
+        grossGainPercentTP3: parseFloat(rr3.grossGainPct.toFixed(2)),
+        netGainPercentTP3: parseFloat(rr3.netGainPct.toFixed(2)),
         riskPercent: parseFloat(rawRiskPct.toFixed(2)),
         suggestedRiskPercent: userRisk,
         tickSize,
@@ -492,7 +566,7 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
           ob15m ? `Order Block baissier identifié à ${formatCryptoPrice(ob15m.bottom, tickSize)} - ${formatCryptoPrice(ob15m.top, tickSize)} USDT.` : `Rejet sous résistance dynamique EMA 20.`,
           `RSI modéré (${rsi15m.toFixed(1)}) sans survente excessive.`,
           `Volume 24h liquide (${(quoteVolume / 1000000).toFixed(1)}M USDT).`,
-          `R/R brut de ${rr1.grossRR.toFixed(2)}:1 et R/R net réel après friction de ${rr1.netRR.toFixed(2)}:1 sur TP1.`,
+          `R/R brut : TP1 (${rr1.grossRR.toFixed(2)}:1), TP2 (${rr2.grossRR.toFixed(2)}:1), TP3 (${rr3.grossRR.toFixed(2)}:1) | Net réel TP1 (${rr1.netRR.toFixed(2)}:1).`,
         ],
         mainRisks: [
           `Rebond soudain (short squeeze) en cas de balayage au-dessus du Stop Loss à ${formatCryptoPrice(alignedSL, tickSize)} USDT.`,
@@ -504,24 +578,24 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
       bias = 'NO_TRADE';
     }
   } else {
-    // NO TRADE case
+    // NO TRADE case: clearly mark checks as non calculable rather than fake numbers
     checklist.push({
       id: 'check-8',
       label: 'Niveau d’invalidation logique (Stop Loss)',
       status: 'FAILED',
-      comment: 'Aucun ancrage structurel net permettant de définir un Stop Loss logique et serré.',
+      comment: 'Non calculable : aucun ancrage structurel net permettant de définir un Stop Loss logique et serré.',
     });
     checklist.push({
       id: 'check-9',
       label: 'Ratio Rendement / Risque brut (R/R brut >= 1.5:1 sur TP1)',
       status: 'FAILED',
-      comment: 'Conditions insuffisantes pour projeter un ratio asymétrique favorable.',
+      comment: 'Non calculable : aucun trade validé (absence d’entrée et de Stop Loss définis). Aucun ratio fictif n’est attribué.',
     });
     checklist.push({
       id: 'check-10',
       label: 'Impact des frais et slippage sur le gain net (R/R net)',
       status: 'FAILED',
-      comment: 'Non applicable en l’absence de configuration validée.',
+      comment: 'Non calculable : calcul d’impact net non applicable en l’absence de configuration validée.',
     });
 
     if (noTradeReasons.length === 0) {
@@ -531,8 +605,25 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
   }
 
   // Calculate Transparent Setup Quality Score (0-100) based strictly on real criteria
-  const htfAlignment = (isBullishHTF || isBearishHTF) && !isOpposingTrend ? 20 : isOpposingTrend ? 4 : 8;
-  const marketStructure = hasFreshSMC ? 20 : (ob15m || fvg15m) ? 12 : 5;
+  const htfAlignment = (isBullishHTF || isBearishHTF) && !isOpposingTrend ? 20 : isOpposingTrend ? 4 : isHTFConsolidating ? 8 : 10;
+  
+  // Market Structure: An LTF SMC structure inside an HTF consolidation cannot receive 20/20 because range chop has low directional probability
+  let marketStructure = 5;
+  if (hasFreshSMC) {
+    if (isBullishHTF || isBearishHTF) {
+      marketStructure = 20; // Confluence SMC alignée avec la tendance HTF
+    } else if (isHTFConsolidating) {
+      marketStructure = timeframe15m?.liquiditySweepDetected ? 12 : 8; // Range HTF : structure interne plafonnée à 8 ou 12 (avec sweep)
+    } else if (isOpposingTrend) {
+      marketStructure = 6; // Divergence HTF : structure LTF à contre-tendance
+    } else {
+      marketStructure = 12;
+    }
+  } else if (ob15m || fvg15m) {
+    marketStructure = (isBullishHTF || isBearishHTF) ? 12 : 6;
+  } else {
+    marketStructure = 3;
+  }
   const entryQuality = (bias !== 'NO_TRADE' && hasFreshSMC) ? 15 : 4;
   const volumeConfirmation = hasHighLiquidity ? 15 : hasModerateLiquidity ? 10 : 2;
   const riskRewardScore = setup ? (setup.riskRewardRatioTP1 >= 2.0 ? 15 : setup.riskRewardRatioTP1 >= 1.5 ? 12 : 2) : 0;
@@ -551,7 +642,7 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
 
   // Strict Capital Preservation: if score < 65 or any critical check failed -> force NO_TRADE
   const hasFailedCriticalCheck = checklist.some(
-    (c) => ['check-1', 'check-2', 'check-5', 'check-6', 'check-7', 'check-8', 'check-9', 'check-10'].includes(c.id) && c.status === 'FAILED'
+    (c) => ['check-1', 'check-2', 'check-3', 'check-5', 'check-6', 'check-7', 'check-8', 'check-9', 'check-10'].includes(c.id) && c.status === 'FAILED'
   );
 
   let finalOutcome: 'LONG' | 'SHORT' | 'NO_TRADE' = bias;

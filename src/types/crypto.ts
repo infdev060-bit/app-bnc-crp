@@ -101,11 +101,24 @@ export interface TradeSetup {
   takeProfit3?: number;
   riskRewardRatioTP1: number; // Ratio brut TP1
   riskRewardRatioTP2: number; // Ratio brut TP2
+  riskRewardRatioTP3?: number; // Ratio brut TP3
   netRiskRewardRatioTP1: number; // Ratio net TP1 après frais et slippage
   netRiskRewardRatioTP2: number; // Ratio net TP2 après frais et slippage
+  netRiskRewardRatioTP3?: number; // Ratio net TP3 après frais et slippage
   grossGainPercentTP1: number;
   netGainPercentTP1: number;
+  grossGainPercentTP2?: number;
+  netGainPercentTP2?: number;
+  grossGainPercentTP3?: number;
+  netGainPercentTP3?: number;
   riskPercent: number; // % distance de l'entrée au SL
+  unitRisk?: number; // Risque par unité (USDT)
+  unitGainTP1?: number; // Gain unitaire sur TP1 (USDT)
+  unitGainTP2?: number; // Gain unitaire sur TP2 (USDT)
+  unitGainTP3?: number; // Gain unitaire sur TP3 (USDT)
+  estimatedFeesPercent?: number; // Frais estimés A/R (%)
+  estimatedSlippagePercent?: number; // Slippage estimé (%)
+  confirmedTimeframes?: string[]; // Timeframes confirmés ex: ['4H', '1H', '15M']
   suggestedRiskPercent: number;
   tickSize?: number;
   keyConfluences: string[];
@@ -237,6 +250,37 @@ export interface SavedAnalysis {
   stopLoss: number;
   tp1: number;
   tp2: number;
+  tp3?: number;
   qualityScore: number;
   summary: string;
 }
+
+export interface ScannedOpportunity {
+  symbol: string;
+  market: MarketType;
+  currentPrice: number;
+  change24h: number;
+  volume24h: number;
+  quoteVolume24h: number;
+  tickSize: number;
+  outcome: 'LONG' | 'SHORT' | 'NO_TRADE';
+  category?: 'BEST_LONG' | 'BEST_SHORT' | 'WATCHLIST' | 'REJECTED';
+  qualityScore: QualityScore;
+  setup?: TradeSetup;
+  noTradeReasons: string[];
+  executiveSummary: string;
+  timestamp: number;
+  stalenessSeconds?: number;
+  snapshots?: Partial<Record<Timeframe, IndicatorSnapshot>>;
+}
+
+export interface ScannerFilterOptions {
+  market: MarketType;
+  direction: 'ALL' | 'LONG' | 'SHORT';
+  timeframe: Timeframe;
+  minVolumeUsd: number;
+  maxCandidates: number;
+  minScore: number;
+  minNetRR: number;
+}
+

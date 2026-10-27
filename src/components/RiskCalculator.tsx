@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { MarketType, RiskCalculation, TradeSetup } from '../types/crypto';
 import { formatCryptoPrice } from '../utils/priceFormatter';
-import { Calculator, ShieldAlert, AlertTriangle, ArrowRight, DollarSign, Percent } from 'lucide-react';
+import { Calculator, ShieldAlert, AlertTriangle, ArrowRight, DollarSign, Percent, TrendingUp } from 'lucide-react';
 
 interface RiskCalculatorProps {
   initialSetup?: TradeSetup | null;
@@ -308,6 +308,107 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
           </span>
         </div>
       </div>
+
+      {/* Target Profit Projections (TP1, TP2, TP3) */}
+      {(initialSetup?.takeProfit1 || initialSetup?.takeProfit2 || initialSetup?.takeProfit3) && calculation.positionSizeCrypto > 0 && (
+        <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-xl space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-200 uppercase tracking-wide flex items-center gap-2">
+              <TrendingUp className="w-4 h-4 text-emerald-400" />
+              Projections Financières sur Objectifs (TP1, TP2, TP3)
+            </span>
+            <span className="text-[11px] text-slate-400">
+              Gains nets calculés après déduction des frais de courtage estimés
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+            {/* TP1 */}
+            {initialSetup?.takeProfit1 && (
+              <div className="p-3 bg-slate-900/90 border border-emerald-950 rounded-lg">
+                <div className="flex items-center justify-between text-slate-400 text-[11px] mb-1">
+                  <span className="font-semibold text-emerald-400">Objectif TP1</span>
+                  <span className="font-mono text-slate-300">{formatCryptoPrice(initialSetup.takeProfit1, initialSetup.tickSize)}$</span>
+                </div>
+                {(() => {
+                  const grossGain = calculation.positionSizeCrypto * Math.abs(initialSetup.takeProfit1 - entryPrice);
+                  const exitFee = (calculation.positionSizeCrypto * initialSetup.takeProfit1) * (feeRatePercent / 100);
+                  const entryFee = calculation.positionSizeUsd * (feeRatePercent / 100);
+                  const netGain = Math.max(0, grossGain - (entryFee + exitFee));
+                  const netRR = calculation.monetaryRisk > 0 ? (netGain / calculation.monetaryRisk) : 0;
+                  return (
+                    <div className="space-y-1">
+                      <div className="text-base font-mono font-bold text-emerald-400">
+                        +{netGain.toFixed(2)} $ <span className="text-xs font-normal text-slate-400">net</span>
+                      </div>
+                      <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+                        <span>Gain brut: +{grossGain.toFixed(2)}$</span>
+                        <span className="text-emerald-400 font-semibold">R/R Net: {netRR.toFixed(2)}:1</span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* TP2 */}
+            {initialSetup?.takeProfit2 && (
+              <div className="p-3 bg-slate-900/90 border border-emerald-950 rounded-lg">
+                <div className="flex items-center justify-between text-slate-400 text-[11px] mb-1">
+                  <span className="font-semibold text-emerald-400">Objectif TP2</span>
+                  <span className="font-mono text-slate-300">{formatCryptoPrice(initialSetup.takeProfit2, initialSetup.tickSize)}$</span>
+                </div>
+                {(() => {
+                  const grossGain = calculation.positionSizeCrypto * Math.abs(initialSetup.takeProfit2 - entryPrice);
+                  const exitFee = (calculation.positionSizeCrypto * initialSetup.takeProfit2) * (feeRatePercent / 100);
+                  const entryFee = calculation.positionSizeUsd * (feeRatePercent / 100);
+                  const netGain = Math.max(0, grossGain - (entryFee + exitFee));
+                  const netRR = calculation.monetaryRisk > 0 ? (netGain / calculation.monetaryRisk) : 0;
+                  return (
+                    <div className="space-y-1">
+                      <div className="text-base font-mono font-bold text-emerald-400">
+                        +{netGain.toFixed(2)} $ <span className="text-xs font-normal text-slate-400">net</span>
+                      </div>
+                      <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+                        <span>Gain brut: +{grossGain.toFixed(2)}$</span>
+                        <span className="text-emerald-400 font-semibold">R/R Net: {netRR.toFixed(2)}:1</span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* TP3 */}
+            {initialSetup?.takeProfit3 && (
+              <div className="p-3 bg-slate-900/90 border border-emerald-950 rounded-lg">
+                <div className="flex items-center justify-between text-slate-400 text-[11px] mb-1">
+                  <span className="font-semibold text-emerald-400">Objectif TP3</span>
+                  <span className="font-mono text-slate-300">{formatCryptoPrice(initialSetup.takeProfit3, initialSetup.tickSize)}$</span>
+                </div>
+                {(() => {
+                  const grossGain = calculation.positionSizeCrypto * Math.abs(initialSetup.takeProfit3 - entryPrice);
+                  const exitFee = (calculation.positionSizeCrypto * initialSetup.takeProfit3) * (feeRatePercent / 100);
+                  const entryFee = calculation.positionSizeUsd * (feeRatePercent / 100);
+                  const netGain = Math.max(0, grossGain - (entryFee + exitFee));
+                  const netRR = calculation.monetaryRisk > 0 ? (netGain / calculation.monetaryRisk) : 0;
+                  return (
+                    <div className="space-y-1">
+                      <div className="text-base font-mono font-bold text-emerald-400">
+                        +{netGain.toFixed(2)} $ <span className="text-xs font-normal text-slate-400">net</span>
+                      </div>
+                      <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+                        <span>Gain brut: +{grossGain.toFixed(2)}$</span>
+                        <span className="text-emerald-400 font-semibold">R/R Net: {netRR.toFixed(2)}:1</span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Rigorous Education Notice */}
       <div className="p-3.5 bg-slate-950/50 border border-slate-800/80 rounded-xl flex items-start gap-3 text-[11px] text-slate-400 leading-relaxed">

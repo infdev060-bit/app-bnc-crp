@@ -56,8 +56,7 @@ Zone d'Entrée: ${setup.entryZone} (Réf: ${formatCryptoPrice(setup.entryPrice, 
 Stop Loss: ${formatCryptoPrice(setup.stopLoss, setup.tickSize)}$ (Invalidation: ${setup.invalidationCondition})
 Objectif 1 (TP1): ${formatCryptoPrice(setup.takeProfit1, setup.tickSize)}$ (R/R Brut: ${setup.riskRewardRatioTP1}:1 | Net: ${setup.netRiskRewardRatioTP1 ?? setup.riskRewardRatioTP1}:1)
 Objectif 2 (TP2): ${formatCryptoPrice(setup.takeProfit2, setup.tickSize)}$ (R/R Brut: ${setup.riskRewardRatioTP2}:1 | Net: ${setup.netRiskRewardRatioTP2 ?? setup.riskRewardRatioTP2}:1)
-${setup.takeProfit3 ? `Objectif 3 (TP3): ${formatCryptoPrice(setup.takeProfit3, setup.tickSize)}$` : ''}
-Risque suggéré: ${setup.suggestedRiskPercent}% du capital
+${setup.takeProfit3 ? `Objectif 3 (TP3): ${formatCryptoPrice(setup.takeProfit3, setup.tickSize)}$ (R/R Brut: ${setup.riskRewardRatioTP3 ?? (setup.riskRewardRatioTP2 * 1.5).toFixed(2)}:1 | Net: ${setup.netRiskRewardRatioTP3 ?? setup.netRiskRewardRatioTP2 ?? setup.riskRewardRatioTP3}:1)\n` : ''}Risque suggéré: ${setup.suggestedRiskPercent}% du capital
 Score de Qualité: ${qualityScore.total}/100 (${qualityScore.ratingLabel})
 =======================================`;
 
@@ -175,7 +174,7 @@ Score de Qualité: ${qualityScore.total}/100 (${qualityScore.ratingLabel})
           /* Active Validated Trade Setup Details */
           <div className="space-y-5">
             {/* Price Levels Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className={`grid grid-cols-1 sm:grid-cols-2 ${setup.takeProfit3 ? 'lg:grid-cols-5' : 'lg:grid-cols-4'} gap-3`}>
               {/* Entry */}
               <div className="p-3.5 bg-slate-950/70 border border-blue-900/60 rounded-xl">
                 <span className="text-[11px] font-semibold text-blue-400 uppercase tracking-wide">
@@ -252,7 +251,11 @@ Score de Qualité: ${qualityScore.total}/100 (${qualityScore.ratingLabel})
                   {formatCryptoPrice(setup.takeProfit2, setup.tickSize)}$
                 </div>
                 <div className="flex items-center justify-between text-[11px] font-mono mt-0.5 text-slate-400">
-                  <span>Extension</span>
+                  <span>
+                    +{setup.grossGainPercentTP2 !== undefined
+                      ? setup.grossGainPercentTP2.toFixed(2)
+                      : (((Math.abs(setup.takeProfit2 - setup.entryPrice)) / setup.entryPrice) * 100).toFixed(2)}%
+                  </span>
                   {setup.netRiskRewardRatioTP2 !== undefined && (
                     <span className="text-emerald-400 font-semibold" title="Ratio net après déduction des frais de courtage et slippage">
                       Net: {setup.netRiskRewardRatioTP2}:1
@@ -260,6 +263,35 @@ Score de Qualité: ${qualityScore.total}/100 (${qualityScore.ratingLabel})
                   )}
                 </div>
               </div>
+
+              {/* TP3 if present */}
+              {setup.takeProfit3 !== undefined && (
+                <div className="p-3.5 bg-slate-950/70 border border-emerald-900/40 rounded-xl">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-emerald-400 uppercase tracking-wide">
+                      Take Profit 3 (TP3)
+                    </span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-emerald-950 text-emerald-300 border border-emerald-800" title="Ratio brut">
+                      Brut {setup.riskRewardRatioTP3 ?? (setup.riskRewardRatioTP2 * 1.5).toFixed(2)}:1
+                    </span>
+                  </div>
+                  <div className="text-lg font-mono font-bold text-emerald-300 mt-1">
+                    {formatCryptoPrice(setup.takeProfit3, setup.tickSize)}$
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] font-mono mt-0.5 text-slate-400">
+                    <span>
+                      +{setup.grossGainPercentTP3 !== undefined
+                        ? setup.grossGainPercentTP3.toFixed(2)
+                        : (((Math.abs(setup.takeProfit3 - setup.entryPrice)) / setup.entryPrice) * 100).toFixed(2)}%
+                    </span>
+                    {setup.netRiskRewardRatioTP3 !== undefined && (
+                      <span className="text-emerald-400 font-semibold" title="Ratio net après déduction des frais de courtage et slippage">
+                        Net: {setup.netRiskRewardRatioTP3}:1
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Invalidation rule */}
