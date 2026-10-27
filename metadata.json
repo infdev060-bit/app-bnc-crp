@@ -1,0 +1,6 @@
+{
+  "name": "Crypto Edge AI",
+  "description": "Plateforme professionnelle d'analyse de trading crypto assistée par IA, axée sur la préservation du capital, le Smart Money Concept (SMC), l'analyse multi-unités de temps et le filtrage rigoureux des configurations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
