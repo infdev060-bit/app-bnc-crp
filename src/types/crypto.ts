@@ -11,6 +11,22 @@ export type MarketType = 'spot' | 'futures';
 
 export type Timeframe = '5m' | '15m' | '1h' | '4h' | '1d';
 
+export type LiveConnectionStatus = 'CONNECTED' | 'RECONNECTING' | 'STALE' | 'DISCONNECTED';
+
+export interface SymbolValidationResult {
+  symbol: string;
+  normalizedSymbol: string;
+  market: MarketType;
+  isValidOnTarget: boolean;
+  isTradingOnTarget: boolean;
+  existsOnAlternative: boolean;
+  isTradingOnAlternative: boolean;
+  alternativeMarket: MarketType | null;
+  message?: string;
+  tickSize?: number;
+  pricePrecision?: number;
+}
+
 export interface TickerData {
   symbol: string;
   market: MarketType;
@@ -27,6 +43,9 @@ export interface TickerData {
   warning?: string;
   tickSize?: number;
   pricePrecision?: number;
+  stalenessSeconds?: number;
+  isStale?: boolean;
+  connectionStatus?: LiveConnectionStatus;
 }
 
 export interface IndicatorSnapshot {

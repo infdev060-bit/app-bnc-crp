@@ -127,18 +127,25 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
   const now = Date.now();
   const tickerTime = ticker?.timestamp || 0;
   const dataAgeSeconds = tickerTime > 0 ? Math.max(0, (now - tickerTime) / 1000) : 999;
-  const isDataFresh = isPriceValid && dataAgeSeconds < 120;
+  const isStaleFlag = Boolean(ticker?.isStale);
+  const isDataFresh = isPriceValid && !isStaleFlag && dataAgeSeconds < 60;
 
   checklist.push({
     id: 'check-1',
     label: 'Fraîcheur et validité des cotations réelles',
-    status: isDataFresh ? 'PASSED' : dataAgeSeconds < 300 ? 'WARNING' : 'FAILED',
-    comment: isPriceValid
+    status: isDataFresh ? 'PASSED' : (isStaleFlag || dataAgeSeconds >= 60) ? 'FAILED' : 'WARNING',
+    comment: isPriceValid && !isStaleFlag && dataAgeSeconds < 60
       ? `Prix vérifié : ${formatCryptoPrice(currentPrice, tickSize)} USDT (Horodatage flux : il y a ${Math.round(dataAgeSeconds)}s).`
+      : isStaleFlag || dataAgeSeconds >= 60
+      ? `Cotations figées ou flux déconnecté (Horodatage : il y a ${Math.round(dataAgeSeconds)}s). Flux obsolète.`
       : 'Prix invalide ou source déconnectée.',
   });
-  if (!isPriceValid || dataAgeSeconds >= 300) {
-    noTradeReasons.push('Données de marché obsolètes (> 5 min) ou prix non disponible.');
+  if (!isPriceValid || isStaleFlag || dataAgeSeconds >= 60) {
+    noTradeReasons.push(
+      isStaleFlag || dataAgeSeconds >= 60
+        ? `Cotations obsolètes ou flux de cotations interrompu (${Math.round(dataAgeSeconds)}s sans mise à jour). Recommandation bloquée.`
+        : 'Données de marché non disponibles ou prix nul.'
+    );
   }
 
   // 2. Pair and Exchange Confirmation (Real API verification)

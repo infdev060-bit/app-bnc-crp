@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Candle,
   IndicatorSnapshot,
+  LiveConnectionStatus,
   MarketType,
   SavedAnalysis,
   TickerData,
@@ -11,6 +12,7 @@ import {
   QualityScore,
   VerificationCheck,
 } from './types/crypto';
+import { useBinancePriceStream } from './hooks/useBinancePriceStream';
 import { generateTimeframeSnapshot } from './utils/indicators';
 import { evaluateMarketSetup, EvaluationResult, validatePriceHierarchy, calculateRiskRewardRatios } from './utils/tradeValidator';
 import { formatCryptoPrice, quantizePrice } from './utils/priceFormatter';
@@ -37,6 +39,8 @@ import {
   Radio,
   Sliders,
   ChevronRight,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
 
 const POPULAR_PAIRS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT', 'AVAXUSDT', 'SUIUSDT'];
@@ -47,13 +51,26 @@ export default function App() {
   const [market, setMarket] = useState<MarketType>('futures');
   const [activeTab, setActiveTab] = useState<'dashboard' | 'vision' | 'calculator' | 'backtest'>('dashboard');
 
-  // Market Data States
-  const [marketError, setMarketError] = useState<string | null>(null);
-  const [ticker, setTicker] = useState<TickerData | null>(null);
+  // Real-time high-frequency WebSocket + REST stream with mobile lifecycle & race condition guards
+  const {
+    ticker,
+    connectionStatus,
+    stalenessSeconds,
+    isStale,
+    marketError,
+    alternativeMarket,
+    refreshNow,
+    isLoading: isLoadingTicker,
+  } = useBinancePriceStream({
+    symbol,
+    market,
+    enabled: true,
+  });
+
+  // Candlestick and Snapshot States
   const [activeTimeframe, setActiveTimeframe] = useState<Timeframe>('1h');
   const [candles, setCandles] = useState<Candle[]>([]);
   const [isLoadingCandles, setIsLoadingCandles] = useState<boolean>(false);
-  const [isLoadingTicker, setIsLoadingTicker] = useState<boolean>(false);
 
   // Multi-timeframe snapshots
   const [snapshots, setSnapshots] = useState<Partial<Record<Timeframe, IndicatorSnapshot>>>({});
@@ -79,32 +96,6 @@ export default function App() {
       return [];
     }
   });
-
-  // Fetch Ticker Data with real Binance error propagation
-  const fetchTicker = useCallback(async (signal?: AbortSignal) => {
-    setIsLoadingTicker(true);
-    try {
-      const res = await fetch(`/api/market/ticker?symbol=${symbol}&market=${market}`, { signal });
-      if (res.ok) {
-        const data = await res.json();
-        setTicker(data);
-        setMarketError(null);
-      } else {
-        const errJson = await res.json().catch(() => ({}));
-        const errMsg = errJson.error || `Paire ${symbol} introuvable sur Binance ${market === 'futures' ? 'Futures' : 'Spot'}.`;
-        setMarketError(errMsg);
-        setTicker(null);
-      }
-    } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        console.error('Erreur chargement ticker:', err);
-        setMarketError(`Erreur de connexion au flux Binance (${err?.message || 'Réseau indisponible'}).`);
-        setTicker(null);
-      }
-    } finally {
-      setIsLoadingTicker(false);
-    }
-  }, [symbol, market]);
 
   // Fetch Klines Data for active timeframe
   const fetchKlines = useCallback(async (tf: Timeframe = activeTimeframe, signal?: AbortSignal) => {
@@ -165,57 +156,83 @@ export default function App() {
     setEvaluation(null);
     setCandles([]);
     setSnapshots({});
-    setMarketError(null);
 
-    fetchTicker(abortController.signal);
     fetchKlines(activeTimeframe, abortController.signal);
     fetchAllTimeframes(abortController.signal);
 
     return () => {
       abortController.abort();
     };
-  }, [symbol, market, fetchTicker, fetchKlines, fetchAllTimeframes, activeTimeframe]);
-
-  // Periodic ticker refresh (every 10s)
-  useEffect(() => {
-    const timer = setInterval(() => {
-      fetchTicker();
-    }, 10000);
-    return () => clearInterval(timer);
-  }, [fetchTicker]);
+  }, [symbol, market, fetchKlines, fetchAllTimeframes, activeTimeframe]);
 
   // 1. Instant deterministic local evaluation (runs purely algorithmically, consumes 0 API quota)
   const runLocalEvaluation = useCallback(() => {
-    if (!ticker) {
-      if (marketError) {
-        setEvaluation({
-          outcome: 'NO_TRADE',
-          qualityScore: {
-            total: 0,
-            ratingLabel: 'INSUFFISANT',
-            breakdown: {
-              htfAlignment: 0,
-              marketStructure: 0,
-              entryQuality: 0,
-              volumeConfirmation: 0,
-              riskRewardScore: 0,
-              volatilityScore: 0,
-              dataReliability: 0,
-            },
-            explanation: 'Données de marché non disponibles pour cette paire.',
+    if (marketError) {
+      setEvaluation({
+        outcome: 'NO_TRADE',
+        qualityScore: {
+          total: 0,
+          ratingLabel: 'INSUFFISANT',
+          breakdown: {
+            htfAlignment: 0,
+            marketStructure: 0,
+            entryQuality: 0,
+            volumeConfirmation: 0,
+            riskRewardScore: 0,
+            volatilityScore: 0,
+            dataReliability: 0,
           },
-          checklist: [
-            {
-              id: 'check-1',
-              label: 'Fraîcheur et validité des cotations réelles',
-              status: 'FAILED',
-              comment: marketError || 'Flux de cotations indisponible.',
-            },
-          ],
-          noTradeReasons: [marketError || `Paire ${symbol} non accessible sur Binance ${market}.`],
-          executiveSummary: `AUCUN TRADE RECOMMANDÉ (NO TRADE). Données de marché indisponibles sur Binance pour ${symbol}.`,
-        });
-      }
+          explanation: 'Données de marché non disponibles pour cette paire.',
+        },
+        checklist: [
+          {
+            id: 'check-1',
+            label: 'Fraîcheur et validité des cotations réelles',
+            status: 'FAILED',
+            comment: marketError,
+          },
+        ],
+        noTradeReasons: [marketError],
+        executiveSummary: `AUCUN TRADE RECOMMANDÉ (NO TRADE). ${marketError}`,
+      });
+      return;
+    }
+
+    if (!ticker) {
+      return;
+    }
+
+    // Staleness guard: if data is stale (> 30s) or stream is lost, strictly block trade setups
+    if (isStale || stalenessSeconds > 30) {
+      setEvaluation({
+        outcome: 'NO_TRADE',
+        qualityScore: {
+          total: 0,
+          ratingLabel: 'INSUFFISANT',
+          breakdown: {
+            htfAlignment: 0,
+            marketStructure: 0,
+            entryQuality: 0,
+            volumeConfirmation: 0,
+            riskRewardScore: 0,
+            volatilityScore: 0,
+            dataReliability: 0,
+          },
+          explanation: 'Flux de cotations interrompu ou figé sur votre appareil.',
+        },
+        checklist: [
+          {
+            id: 'check-1',
+            label: 'Fraîcheur et validité des cotations réelles',
+            status: 'FAILED',
+            comment: `Cotations figées depuis ${stalenessSeconds}s (seuil max 30s). Flux WebSocket/REST interrompu.`,
+          },
+        ],
+        noTradeReasons: [
+          `Cotations interrompues ou figées depuis ${stalenessSeconds} secondes. Par mesure stricte de préservation du capital, aucune configuration n'est autorisée sur des données de marché obsolètes.`,
+        ],
+        executiveSummary: `AUCUN TRADE RECOMMANDÉ (NO TRADE). Cotations de marché obsolètes ou déconnectées sur votre terminal.`,
+      });
       return;
     }
 
@@ -232,7 +249,7 @@ export default function App() {
     });
 
     setEvaluation(localResult);
-  }, [symbol, market, ticker, snapshots, marketError]);
+  }, [symbol, market, ticker, snapshots, marketError, isStale, stalenessSeconds]);
 
   // 2. On-demand AI Deep Verification (called explicitly by user, handles 429 quota limits gracefully)
   const runAiDeepAnalysis = useCallback(async () => {
@@ -529,13 +546,13 @@ export default function App() {
 
             <button
               onClick={() => {
-                fetchTicker();
+                refreshNow();
                 fetchKlines();
                 fetchAllTimeframes();
               }}
               disabled={isLoadingTicker}
               title="Rafraîchir les flux"
-              className="p-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-50"
+              className="p-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-50 cursor-pointer"
             >
               <RefreshCw className={`w-4 h-4 ${isLoadingTicker ? 'animate-spin text-blue-400' : ''}`} />
             </button>
@@ -550,7 +567,7 @@ export default function App() {
               <button
                 key={p}
                 onClick={() => handleSelectPopular(p)}
-                className={`px-2 py-0.5 rounded font-mono text-[11px] transition-colors shrink-0 ${
+                className={`px-2 py-0.5 rounded font-mono text-[11px] transition-colors shrink-0 cursor-pointer ${
                   symbol === p
                     ? 'bg-blue-950 border border-blue-600 text-blue-300 font-semibold'
                     : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
@@ -565,63 +582,113 @@ export default function App() {
 
       {/* Live Market Ticker Strip */}
       <section className="bg-slate-900/90 border-b border-slate-800 px-4 sm:px-6 py-2.5">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-y-2 gap-x-6 text-xs">
-          <div className="flex items-center gap-3">
-            <span className="font-mono font-bold text-base text-slate-100 flex items-center gap-1.5">
-              {symbol}
-              <span className="text-[10px] font-sans font-normal uppercase px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
-                {market === 'futures' ? 'Perpétuel USDT-M' : 'Marché Comptant'}
-              </span>
-            </span>
-
-            {marketError && (
-              <div className="flex items-center gap-2 px-3 py-1 bg-rose-950/80 border border-rose-800 rounded-lg text-rose-300 text-xs">
-                <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+        <div className="max-w-7xl mx-auto flex flex-col gap-2">
+          {/* Mismatch Market Notification / Error Banner */}
+          {marketError && (
+            <div className="flex flex-wrap items-center justify-between gap-3 px-3.5 py-2 bg-amber-950/70 border border-amber-800/80 rounded-xl text-amber-200 text-xs shadow-lg">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
                 <span>{marketError}</span>
               </div>
-            )}
-
-            {ticker && (
-              <div className="flex items-center gap-2">
-                <span className="text-lg font-mono font-bold text-slate-100">
-                  {formatCryptoPrice(ticker.price, ticker.tickSize)} USDT
-                </span>
-                <span
-                  className={`flex items-center gap-0.5 font-mono font-semibold px-2 py-0.5 rounded ${
-                    ticker.change24h >= 0
-                      ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
-                      : 'bg-rose-950/80 text-rose-400 border border-rose-800'
-                  }`}
+              {alternativeMarket && (
+                <button
+                  onClick={() => setMarket(alternativeMarket)}
+                  className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white font-semibold rounded-lg text-xs shadow-md shadow-amber-950/40 transition-colors flex items-center gap-1.5 shrink-0 cursor-pointer"
                 >
-                  {ticker.change24h >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                  {ticker.change24h >= 0 ? '+' : ''}{ticker.change24h.toFixed(2)}%
+                  <span>Passer sur {alternativeMarket === 'futures' ? 'Binance Futures' : 'Binance Spot'}</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between gap-y-2 gap-x-6 text-xs">
+            <div className="flex items-center flex-wrap gap-3">
+              <span className="font-mono font-bold text-base text-slate-100 flex items-center gap-1.5">
+                {symbol}
+                <span className="text-[10px] font-sans font-normal uppercase px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
+                  {market === 'futures' ? 'Perpétuel USDⓈ-M' : 'Marché Spot'}
                 </span>
+              </span>
+
+              {/* Live Connection and Freshness Badge */}
+              <div className="flex items-center gap-2">
+                {/* 1. Stale alert badge: strictly when truly stale (>= 25s) */}
+                {(isStale || stalenessSeconds >= 25) && (
+                  <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-rose-950/80 border border-rose-700/60 text-rose-300 text-[11px] font-mono">
+                    <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                    <span>COTATIONS FIGÉES ({stalenessSeconds}s)</span>
+                    <button
+                      onClick={refreshNow}
+                      className="underline hover:text-white ml-1 cursor-pointer font-sans"
+                    >
+                      Actualiser
+                    </button>
+                  </div>
+                )}
+
+                {/* 2. Reconnecting badge */}
+                {connectionStatus === 'RECONNECTING' && !isStale && stalenessSeconds < 25 && (
+                  <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-950/80 border border-amber-700/60 text-amber-400 text-[11px] font-mono">
+                    <RefreshCw className="w-3 h-3 animate-spin" />
+                    <span>RECONNEXION...</span>
+                  </div>
+                )}
+
+                {/* 3. Live streaming badge */}
+                {connectionStatus === 'CONNECTED' && !isStale && stalenessSeconds < 25 && (
+                  <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-700/60 text-emerald-400 text-[11px] font-mono">
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                    </span>
+                    <span>EN DIRECT {stalenessSeconds > 1 ? `(${stalenessSeconds}s)` : ''}</span>
+                  </div>
+                )}
+              </div>
+
+              {ticker && ticker.price > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-lg font-mono font-bold text-slate-100">
+                    {formatCryptoPrice(ticker.price, ticker.tickSize)} USDT
+                  </span>
+                  <span
+                    className={`flex items-center gap-0.5 font-mono font-semibold px-2 py-0.5 rounded ${
+                      ticker.change24h >= 0
+                        ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
+                        : 'bg-rose-950/80 text-rose-400 border border-rose-800'
+                    }`}
+                  >
+                    {ticker.change24h >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                    {ticker.change24h >= 0 ? '+' : ''}{ticker.change24h.toFixed(2)}%
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {ticker && ticker.price > 0 && (
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-slate-400 text-[11px] font-mono">
+                <div>
+                  <span className="text-slate-500">Haut 24h : </span>
+                  <span className="text-slate-200">{formatCryptoPrice(ticker.high24h, ticker.tickSize)}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500">Bas 24h : </span>
+                  <span className="text-slate-200">{formatCryptoPrice(ticker.low24h, ticker.tickSize)}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500">Vol 24h : </span>
+                  <span className="text-slate-200">
+                    {ticker.volume24h.toLocaleString('fr-FR', { maximumFractionDigits: 0 })} {symbol.replace('USDT', '')}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5 text-slate-300">
+                  <Radio className="w-3 h-3 text-blue-400 animate-pulse" />
+                  <span>{ticker.source}</span>
+                </div>
               </div>
             )}
           </div>
-
-          {ticker && (
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-slate-400 text-[11px] font-mono">
-              <div>
-                <span className="text-slate-500">Haut 24h : </span>
-                <span className="text-slate-200">{ticker.high24h.toLocaleString('fr-FR', { minimumFractionDigits: 2 })}</span>
-              </div>
-              <div>
-                <span className="text-slate-500">Bas 24h : </span>
-                <span className="text-slate-200">{ticker.low24h.toLocaleString('fr-FR', { minimumFractionDigits: 2 })}</span>
-              </div>
-              <div>
-                <span className="text-slate-500">Vol 24h : </span>
-                <span className="text-slate-200">
-                  {ticker.volume24h.toLocaleString('fr-FR', { maximumFractionDigits: 0 })} {symbol.replace('USDT', '')}
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className={`w-2 h-2 rounded-full ${ticker.isLive ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
-                <span className="text-slate-300">{ticker.source}</span>
-              </div>
-            </div>
-          )}
         </div>
       </section>
 

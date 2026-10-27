@@ -1,4 +1,5 @@
 import express from 'express';
+import http from 'http';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -7,6 +8,7 @@ import { GoogleGenAI } from '@google/genai';
 dotenv.config();
 
 const app = express();
+const httpServer = http.createServer(app);
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const isProduction = process.env.NODE_ENV === 'production';
 
@@ -37,72 +39,294 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Cache for Binance exchangeInfo symbol rules (tickSize, precision)
+// Cache for Binance exchangeInfo symbol rules (tickSize, precision, status, market availability)
 interface SymbolFilterInfo {
+  symbol: string;
+  baseAsset: string;
+  quoteAsset: string;
+  status: string; // 'TRADING', 'BREAK', 'HALT', etc.
   tickSize: number;
   minPrice: number;
   maxPrice: number;
   pricePrecision: number;
+  market: 'spot' | 'futures';
+  isTrading: boolean;
 }
 
-const spotSymbolCache = new Map<string, SymbolFilterInfo>();
+let spotExchangeInfoCache: { timestamp: number; symbols: Map<string, SymbolFilterInfo> } | null = null;
 let futuresExchangeInfoCache: { timestamp: number; symbols: Map<string, SymbolFilterInfo> } | null = null;
 
-async function getSymbolFilters(symbol: string, market: 'spot' | 'futures'): Promise<SymbolFilterInfo | null> {
-  try {
-    if (market === 'futures') {
-      const now = Date.now();
-      if (!futuresExchangeInfoCache || now - futuresExchangeInfoCache.timestamp > 3600000) {
-        const resp = await fetch('https://fapi.binance.com/fapi/v1/exchangeInfo');
-        if (resp.ok) {
-          const data = await resp.json();
-          const map = new Map<string, SymbolFilterInfo>();
-          if (Array.isArray(data.symbols)) {
-            for (const s of data.symbols) {
-              const priceFilter = s.filters?.find((f: any) => f.filterType === 'PRICE_FILTER');
-              map.set(s.symbol, {
-                tickSize: parseFloat(priceFilter?.tickSize) || 0.00001,
-                minPrice: parseFloat(priceFilter?.minPrice) || 0.00001,
-                maxPrice: parseFloat(priceFilter?.maxPrice) || 1000000,
-                pricePrecision: s.pricePrecision || 5,
-              });
-            }
-          }
-          futuresExchangeInfoCache = { timestamp: now, symbols: map };
-        }
-      }
-      return futuresExchangeInfoCache?.symbols.get(symbol) || null;
-    } else {
-      if (spotSymbolCache.has(symbol)) {
-        return spotSymbolCache.get(symbol)!;
-      }
-      const resp = await fetch(`https://api.binance.com/api/v3/exchangeInfo?symbol=${symbol}`);
+async function getExchangeInfo(market: 'spot' | 'futures'): Promise<Map<string, SymbolFilterInfo>> {
+  const now = Date.now();
+  const CACHE_TTL_MS = 3600000; // 1 hour
+
+  if (market === 'futures') {
+    if (futuresExchangeInfoCache && now - futuresExchangeInfoCache.timestamp < CACHE_TTL_MS) {
+      return futuresExchangeInfoCache.symbols;
+    }
+    try {
+      const resp = await fetch('https://fapi.binance.com/fapi/v1/exchangeInfo');
       if (resp.ok) {
         const data = await resp.json();
-        const s = data.symbols?.[0];
-        if (s) {
-          const priceFilter = s.filters?.find((f: any) => f.filterType === 'PRICE_FILTER');
-          const info: SymbolFilterInfo = {
-            tickSize: parseFloat(priceFilter?.tickSize) || 0.01,
-            minPrice: parseFloat(priceFilter?.minPrice) || 0.01,
-            maxPrice: parseFloat(priceFilter?.maxPrice) || 1000000,
-            pricePrecision: s.quotePrecision || 2,
-          };
-          spotSymbolCache.set(symbol, info);
-          return info;
+        const map = new Map<string, SymbolFilterInfo>();
+        if (Array.isArray(data.symbols)) {
+          for (const s of data.symbols) {
+            const priceFilter = s.filters?.find((f: any) => f.filterType === 'PRICE_FILTER');
+            map.set(s.symbol, {
+              symbol: s.symbol,
+              baseAsset: s.baseAsset || '',
+              quoteAsset: s.quoteAsset || '',
+              status: s.status || '',
+              tickSize: parseFloat(priceFilter?.tickSize) || 0.0001,
+              minPrice: parseFloat(priceFilter?.minPrice) || 0.0001,
+              maxPrice: parseFloat(priceFilter?.maxPrice) || 1000000,
+              pricePrecision: typeof s.pricePrecision === 'number' ? s.pricePrecision : 4,
+              market: 'futures',
+              isTrading: s.status === 'TRADING' && s.contractType === 'PERPETUAL',
+            });
+          }
         }
+        futuresExchangeInfoCache = { timestamp: now, symbols: map };
+        return map;
+      }
+    } catch (err) {
+      console.warn('[ExchangeInfo] Erreur lors du chargement de fapi exchangeInfo:', err);
+      if (futuresExchangeInfoCache) return futuresExchangeInfoCache.symbols;
+    }
+    return new Map();
+  } else {
+    if (spotExchangeInfoCache && now - spotExchangeInfoCache.timestamp < CACHE_TTL_MS) {
+      return spotExchangeInfoCache.symbols;
+    }
+    try {
+      const resp = await fetch('https://api.binance.com/api/v3/exchangeInfo');
+      if (resp.ok) {
+        const data = await resp.json();
+        const map = new Map<string, SymbolFilterInfo>();
+        if (Array.isArray(data.symbols)) {
+          for (const s of data.symbols) {
+            const priceFilter = s.filters?.find((f: any) => f.filterType === 'PRICE_FILTER');
+            map.set(s.symbol, {
+              symbol: s.symbol,
+              baseAsset: s.baseAsset || '',
+              quoteAsset: s.quoteAsset || '',
+              status: s.status || '',
+              tickSize: parseFloat(priceFilter?.tickSize) || 0.01,
+              minPrice: parseFloat(priceFilter?.minPrice) || 0.01,
+              maxPrice: parseFloat(priceFilter?.maxPrice) || 1000000,
+              pricePrecision: typeof s.quotePrecision === 'number' ? s.quotePrecision : 2,
+              market: 'spot',
+              isTrading: s.status === 'TRADING' && s.isSpotTradingAllowed !== false,
+            });
+          }
+        }
+        spotExchangeInfoCache = { timestamp: now, symbols: map };
+        return map;
+      }
+    } catch (err) {
+      console.warn('[ExchangeInfo] Erreur lors du chargement de api/v3 exchangeInfo:', err);
+      if (spotExchangeInfoCache) return spotExchangeInfoCache.symbols;
+    }
+    return new Map();
+  }
+}
+
+interface ValidationResult {
+  symbol: string;
+  normalizedSymbol: string;
+  market: 'spot' | 'futures';
+  isValidOnTarget: boolean;
+  isTradingOnTarget: boolean;
+  existsOnAlternative: boolean;
+  isTradingOnAlternative: boolean;
+  alternativeMarket: 'spot' | 'futures' | null;
+  message?: string;
+  tickSize?: number;
+  pricePrecision?: number;
+}
+
+async function validateMarketSymbol(rawSymbol: string, targetMarket: 'spot' | 'futures'): Promise<ValidationResult> {
+  const symbol = rawSymbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const altMarket: 'spot' | 'futures' = targetMarket === 'futures' ? 'spot' : 'futures';
+
+  const [targetMap, altMap] = await Promise.all([
+    getExchangeInfo(targetMarket),
+    getExchangeInfo(altMarket),
+  ]);
+
+  const targetInfo = targetMap.get(symbol);
+  const altInfo = altMap.get(symbol);
+
+  if (targetInfo && targetInfo.isTrading) {
+    return {
+      symbol,
+      normalizedSymbol: symbol,
+      market: targetMarket,
+      isValidOnTarget: true,
+      isTradingOnTarget: true,
+      existsOnAlternative: Boolean(altInfo),
+      isTradingOnAlternative: Boolean(altInfo?.isTrading),
+      alternativeMarket: altInfo?.isTrading ? altMarket : null,
+      tickSize: targetInfo.tickSize,
+      pricePrecision: targetInfo.pricePrecision,
+    };
+  }
+
+  // Not trading or missing on target market
+  if (altInfo && altInfo.isTrading) {
+    const targetLabel = targetMarket === 'futures' ? 'Binance USDⓈ-M Futures' : 'Binance Spot';
+    const altLabel = altMarket === 'futures' ? 'Binance USDⓈ-M Futures' : 'Binance Spot';
+    return {
+      symbol,
+      normalizedSymbol: symbol,
+      market: targetMarket,
+      isValidOnTarget: false,
+      isTradingOnTarget: false,
+      existsOnAlternative: true,
+      isTradingOnAlternative: true,
+      alternativeMarket: altMarket,
+      tickSize: altInfo.tickSize,
+      pricePrecision: altInfo.pricePrecision,
+      message: `La paire ${symbol} n'est pas négociable sur ${targetLabel}, mais elle est active sur ${altLabel}.`,
+    };
+  }
+
+  // Symbol not found on either market
+  return {
+    symbol,
+    normalizedSymbol: symbol,
+    market: targetMarket,
+    isValidOnTarget: false,
+    isTradingOnTarget: false,
+    existsOnAlternative: false,
+    isTradingOnAlternative: false,
+    alternativeMarket: null,
+    message: `Le symbole "${symbol}" est introuvable sur Binance (ni sur Spot, ni sur Futures). Aucun graphique ni cotation simulée.`,
+  };
+}
+
+// API: Validate Symbol and Check Cross-Market Availability
+app.get('/api/market/validate-symbol', async (req, res) => {
+  const symbol = ((req.query.symbol as string) || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const market = (req.query.market as string) === 'futures' ? 'futures' : 'spot';
+
+  if (!symbol) {
+    return res.status(400).json({ error: 'Symbole manquant.' });
+  }
+
+  const result = await validateMarketSymbol(symbol, market);
+  return res.json(result);
+});
+
+// API: Search Symbols with Cross-Market Availability Intelligence
+app.get('/api/market/search-symbols', async (req, res) => {
+  const query = ((req.query.q as string) || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const market = (req.query.market as string) === 'futures' ? 'futures' : 'spot';
+  const altMarket: 'spot' | 'futures' = market === 'futures' ? 'spot' : 'futures';
+
+  if (!query) {
+    return res.json({ query: '', results: [] });
+  }
+
+  const [targetMap, altMap] = await Promise.all([
+    getExchangeInfo(market),
+    getExchangeInfo(altMarket),
+  ]);
+
+  const matches: Array<{
+    symbol: string;
+    baseAsset: string;
+    quoteAsset: string;
+    isTradingOnCurrent: boolean;
+    isTradingOnAlternative: boolean;
+    alternativeMarket: 'spot' | 'futures' | null;
+  }> = [];
+
+  const seen = new Set<string>();
+
+  // 1. Direct match with or without USDT
+  const directCandidates = [
+    query,
+    query.endsWith('USDT') ? query : `${query}USDT`,
+    market === 'futures' && !query.startsWith('1000') ? `1000${query.endsWith('USDT') ? query : `${query}USDT`}` : '',
+  ].filter(Boolean);
+
+  for (const cand of directCandidates) {
+    if (targetMap.has(cand) || altMap.has(cand)) {
+      if (!seen.has(cand)) {
+        seen.add(cand);
+        const tInfo = targetMap.get(cand);
+        const aInfo = altMap.get(cand);
+        matches.push({
+          symbol: cand,
+          baseAsset: tInfo?.baseAsset || aInfo?.baseAsset || '',
+          quoteAsset: tInfo?.quoteAsset || aInfo?.quoteAsset || 'USDT',
+          isTradingOnCurrent: Boolean(tInfo?.isTrading),
+          isTradingOnAlternative: Boolean(aInfo?.isTrading),
+          alternativeMarket: aInfo?.isTrading ? altMarket : null,
+        });
       }
     }
-  } catch (err) {
-    console.warn(`[ExchangeInfo] Impossible de charger les filtres pour ${symbol} sur ${market}:`, err);
   }
-  return null;
-}
+
+  // 2. Base asset match or prefix match
+  for (const [sym, info] of targetMap.entries()) {
+    if (matches.length >= 10) break;
+    if (seen.has(sym)) continue;
+    if (info.isTrading && (info.baseAsset === query || sym.startsWith(query))) {
+      seen.add(sym);
+      const aInfo = altMap.get(sym);
+      matches.push({
+        symbol: sym,
+        baseAsset: info.baseAsset,
+        quoteAsset: info.quoteAsset,
+        isTradingOnCurrent: true,
+        isTradingOnAlternative: Boolean(aInfo?.isTrading),
+        alternativeMarket: aInfo?.isTrading ? altMarket : null,
+      });
+    }
+  }
+
+  // 3. Alternative market matches if target market has few results
+  if (matches.length < 5) {
+    for (const [sym, info] of altMap.entries()) {
+      if (matches.length >= 10) break;
+      if (seen.has(sym)) continue;
+      if (info.isTrading && (info.baseAsset === query || sym.startsWith(query))) {
+        seen.add(sym);
+        matches.push({
+          symbol: sym,
+          baseAsset: info.baseAsset,
+          quoteAsset: info.quoteAsset,
+          isTradingOnCurrent: false,
+          isTradingOnAlternative: true,
+          alternativeMarket: altMarket,
+        });
+      }
+    }
+  }
+
+  return res.json({ query, results: matches });
+});
 
 // API: Ticker 24h market data from official Binance public endpoints
 app.get('/api/market/ticker', async (req, res) => {
   const symbol = ((req.query.symbol as string) || 'BTCUSDT').toUpperCase().replace(/[^A-Z0-9]/g, '');
-  const market = (req.query.market as string) || 'spot'; // 'spot' | 'futures'
+  const market = (req.query.market as string) === 'futures' ? 'futures' : 'spot';
+
+  // 1. Validate symbol against official Exchange Info before requesting Binance API
+  const validation = await validateMarketSymbol(symbol, market);
+  if (!validation.isValidOnTarget) {
+    return res.status(404).json({
+      error: validation.message,
+      symbol,
+      market,
+      existsOnTarget: false,
+      existsOnAlternative: validation.existsOnAlternative,
+      alternativeMarket: validation.alternativeMarket,
+      isLive: false,
+    });
+  }
 
   const endpoint = market === 'futures'
     ? `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${symbol}`
@@ -112,13 +336,10 @@ app.get('/api/market/ticker', async (req, res) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
 
-    const [tickerRes, filterInfo] = await Promise.all([
-      fetch(endpoint, {
-        signal: controller.signal,
-        headers: { 'Accept': 'application/json' },
-      }),
-      getSymbolFilters(symbol, market as any),
-    ]);
+    const tickerRes = await fetch(endpoint, {
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' },
+    });
     clearTimeout(timeout);
 
     const rateLimitWeight = tickerRes.headers.get('x-mbx-used-weight-1m') || 'N/A';
@@ -135,8 +356,8 @@ app.get('/api/market/ticker', async (req, res) => {
         });
       }
 
-      const tickSize = filterInfo?.tickSize || (lastPrice < 0.1 ? 0.00001 : lastPrice < 1 ? 0.0001 : 0.01);
-      const pricePrecision = filterInfo?.pricePrecision || (lastPrice < 0.1 ? 5 : lastPrice < 1 ? 4 : 2);
+      const tickSize = validation.tickSize || (lastPrice < 0.1 ? 0.00001 : lastPrice < 1 ? 0.0001 : 0.01);
+      const pricePrecision = validation.pricePrecision || (lastPrice < 0.1 ? 5 : lastPrice < 1 ? 4 : 2);
 
       return res.json({
         symbol,
@@ -156,8 +377,7 @@ app.get('/api/market/ticker', async (req, res) => {
         pricePrecision,
       });
     } else {
-      // Binance returned an error (e.g. 400 Invalid Symbol)
-      let errorMsg = `La paire ${symbol} est introuvable ou non supportée sur ${market === 'futures' ? 'Binance Futures' : 'Binance Spot'}.`;
+      let errorMsg = `La paire ${symbol} est introuvable ou indisponible sur ${market === 'futures' ? 'Binance Futures' : 'Binance Spot'}.`;
       try {
         const errorJson = await tickerRes.json();
         if (errorJson.msg) {
@@ -171,6 +391,9 @@ app.get('/api/market/ticker', async (req, res) => {
         error: errorMsg,
         symbol,
         market,
+        existsOnTarget: false,
+        existsOnAlternative: validation.existsOnAlternative,
+        alternativeMarket: validation.alternativeMarket,
         isLive: false,
       });
     }
@@ -190,7 +413,23 @@ app.get('/api/market/klines', async (req, res) => {
   const symbol = ((req.query.symbol as string) || 'BTCUSDT').toUpperCase().replace(/[^A-Z0-9]/g, '');
   const interval = (req.query.interval as string) || '1h'; // 5m, 15m, 1h, 4h, 1d
   const limit = Math.min(parseInt(req.query.limit as string, 10) || 80, 200);
-  const market = (req.query.market as string) || 'spot';
+  const market = (req.query.market as string) === 'futures' ? 'futures' : 'spot';
+
+  // 1. Validate symbol against official Exchange Info before requesting Binance API
+  const validation = await validateMarketSymbol(symbol, market);
+  if (!validation.isValidOnTarget) {
+    return res.status(404).json({
+      error: validation.message,
+      symbol,
+      interval,
+      market,
+      existsOnTarget: false,
+      existsOnAlternative: validation.existsOnAlternative,
+      alternativeMarket: validation.alternativeMarket,
+      isLive: false,
+      klines: [],
+    });
+  }
 
   const endpoint = market === 'futures'
     ? `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
@@ -254,6 +493,9 @@ app.get('/api/market/klines', async (req, res) => {
         symbol,
         interval,
         market,
+        existsOnTarget: false,
+        existsOnAlternative: validation.existsOnAlternative,
+        alternativeMarket: validation.alternativeMarket,
         isLive: false,
         klines: [],
       });
@@ -540,7 +782,12 @@ IMPORTANT : Renvoie uniquement le JSON pur sans balise markdown.`;
 async function startServer() {
   if (!isProduction) {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: {
+          server: httpServer,
+        },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -552,7 +799,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`[Crypto Edge AI Server] Démarré sur http://localhost:${PORT} (Mode: ${isProduction ? 'Production' : 'Développement'})`);
   });
 }
