@@ -559,6 +559,18 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
         grossGainPercentTP3: parseFloat(rr3.grossGainPct.toFixed(2)),
         netGainPercentTP3: parseFloat(rr3.netGainPct.toFixed(2)),
         riskPercent: parseFloat(rawRiskPct.toFixed(2)),
+        unitRisk: parseFloat(Math.abs(alignedSL - alignedEntry).toFixed(tickSize < 0.1 ? 6 : 2)),
+        unitGainTP1: parseFloat(Math.abs(alignedEntry - alignedTP1).toFixed(tickSize < 0.1 ? 6 : 2)),
+        unitGainTP2: parseFloat(Math.abs(alignedEntry - alignedTP2).toFixed(tickSize < 0.1 ? 6 : 2)),
+        unitGainTP3: alignedTP3 ? parseFloat(Math.abs(alignedEntry - alignedTP3).toFixed(tickSize < 0.1 ? 6 : 2)) : undefined,
+        estimatedFeesPercent: market === 'futures' ? 0.08 : 0.20,
+        estimatedSlippagePercent: 0.05,
+        confirmedTimeframes: [
+          ...(timeframe4h?.trend === 'BAISSIÈRE' ? ['4H'] : []),
+          ...(timeframe1h?.trend === 'BAISSIÈRE' ? ['1H'] : []),
+          ...(timeframe15m?.trend === 'BAISSIÈRE' ? ['15M'] : []),
+          ...(timeframe5m?.trend === 'BAISSIÈRE' ? ['5M'] : []),
+        ],
         suggestedRiskPercent: userRisk,
         tickSize,
         keyConfluences: [

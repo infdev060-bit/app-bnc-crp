@@ -267,6 +267,7 @@ export interface ScannedOpportunity {
   category?: 'BEST_LONG' | 'BEST_SHORT' | 'WATCHLIST' | 'REJECTED';
   qualityScore: QualityScore;
   setup?: TradeSetup;
+  checklist?: VerificationCheck[];
   noTradeReasons: string[];
   executiveSummary: string;
   timestamp: number;

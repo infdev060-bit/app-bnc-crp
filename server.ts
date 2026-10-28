@@ -436,6 +436,21 @@ app.get('/api/market/scanner-analyze-pair', async (req, res) => {
       userRiskPercent: 1.0,
     });
 
+    let category: 'BEST_LONG' | 'BEST_SHORT' | 'WATCHLIST' | 'REJECTED' = 'REJECTED';
+    if (evaluation.outcome === 'LONG' && evaluation.qualityScore.total >= 65 && (evaluation.setup?.netRiskRewardRatioTP1 || 0) >= 1.2) {
+      category = 'BEST_LONG';
+    } else if (evaluation.outcome === 'SHORT' && evaluation.qualityScore.total >= 65 && (evaluation.setup?.netRiskRewardRatioTP1 || 0) >= 1.2) {
+      category = 'BEST_SHORT';
+    } else if (
+      evaluation.qualityScore.total >= 45 ||
+      evaluation.checklist.some((c) => c.id === 'check-4' && (c.status === 'PASSED' || c.status === 'WARNING')) ||
+      Boolean(evaluation.setup)
+    ) {
+      category = 'WATCHLIST';
+    } else {
+      category = 'REJECTED';
+    }
+
     return res.json({
       symbol,
       market,
@@ -446,12 +461,14 @@ app.get('/api/market/scanner-analyze-pair', async (req, res) => {
       tickSize,
       pricePrecision,
       outcome: evaluation.outcome,
+      category,
       qualityScore: evaluation.qualityScore,
       setup: evaluation.setup,
       checklist: evaluation.checklist,
       noTradeReasons: evaluation.noTradeReasons,
       executiveSummary: evaluation.executiveSummary,
       timestamp: Date.now(),
+      stalenessSeconds: 0,
       snapshots: {
         '4h': snap4h,
         '1h': snap1h,

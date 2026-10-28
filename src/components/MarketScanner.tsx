@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { MarketType, Timeframe, ScannedOpportunity } from '../types/crypto';
 import { formatCryptoPrice } from '../utils/priceFormatter';
 import {
@@ -22,12 +22,20 @@ import {
   DollarSign,
   Activity,
   Flame,
+  Eye,
+  Sliders,
+  CheckSquare,
+  BarChart2,
+  Percent,
+  Check,
 } from 'lucide-react';
 
 interface MarketScannerProps {
   currentMarket: MarketType;
   onSelectPair: (symbol: string, market: MarketType) => void;
 }
+
+type CategoryTab = 'best_long' | 'best_short' | 'watchlist' | 'all';
 
 export const MarketScanner: React.FC<MarketScannerProps> = ({
   currentMarket,
@@ -37,9 +45,11 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
   const [selectedMarket, setSelectedMarket] = useState<MarketType>(currentMarket);
   const [directionFilter, setDirectionFilter] = useState<'ALL' | 'LONG' | 'SHORT'>('ALL');
   const [minVolumeUsd, setMinVolumeUsd] = useState<number>(selectedMarket === 'futures' ? 10000000 : 2000000);
+  const [minScore, setMinScore] = useState<number>(65);
+  const [minNetRR, setMinNetRR] = useState<number>(1.2);
   const [candidateLimit, setCandidateLimit] = useState<number>(25);
   const [sortBy, setSortBy] = useState<'score' | 'netRR' | 'volume' | 'change'>('score');
-  const [viewFilter, setViewFilter] = useState<'validated' | 'all'>('validated');
+  const [categoryTab, setCategoryTab] = useState<CategoryTab>('best_long');
   const [searchFilter, setSearchFilter] = useState<string>('');
 
   // Scanning execution state
@@ -52,6 +62,7 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
   const [results, setResults] = useState<ScannedOpportunity[]>([]);
   const [scanTimestamp, setScanTimestamp] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [refreshingSymbols, setRefreshingSymbols] = useState<Set<string>>(new Set());
 
   // Abort controller ref for stopping scans mid-flight
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -168,29 +179,88 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
     setIsScanning(false);
   };
 
-  // Filter and sort results
-  const filteredAndSortedResults = React.useMemo(() => {
-    let list = [...results];
+  // Refresh single candidate pair individually without restarting full scan
+  const refreshSinglePair = async (symbol: string, market: MarketType) => {
+    if (refreshingSymbols.has(symbol)) return;
 
-    // Direction filter
+    setRefreshingSymbols((prev) => new Set(prev).add(symbol));
+    try {
+      const res = await fetch(`/api/market/scanner-analyze-pair?symbol=${symbol}&market=${market}`);
+      if (res.ok) {
+        const updatedPair: ScannedOpportunity = await res.json();
+        setResults((prev) => prev.map((item) => (item.symbol === symbol ? updatedPair : item)));
+      }
+    } catch (err) {
+      console.warn(`[Scanner Refresh] Erreur sur ${symbol}:`, err);
+    } finally {
+      setRefreshingSymbols((prev) => {
+        const next = new Set(prev);
+        next.delete(symbol);
+        return next;
+      });
+    }
+  };
+
+  // Categorize opportunities according to explicit thresholds
+  const categorizedOpportunities = useMemo(() => {
+    const bestLong: ScannedOpportunity[] = [];
+    const bestShort: ScannedOpportunity[] = [];
+    const watchlist: ScannedOpportunity[] = [];
+    const rejected: ScannedOpportunity[] = [];
+
+    for (const item of results) {
+      const isLong = item.outcome === 'LONG';
+      const isShort = item.outcome === 'SHORT';
+      const scorePasses = item.qualityScore.total >= minScore;
+      const netRR = item.setup?.netRiskRewardRatioTP1 || 0;
+      const netRRPasses = netRR >= minNetRR;
+
+      if (isLong && scorePasses && netRRPasses) {
+        bestLong.push({ ...item, category: 'BEST_LONG' });
+      } else if (isShort && scorePasses && netRRPasses) {
+        bestShort.push({ ...item, category: 'BEST_SHORT' });
+      } else if (
+        item.qualityScore.total >= 45 ||
+        (item.setup && netRR >= 1.0) ||
+        item.checklist?.some((c) => c.id === 'check-4' && (c.status === 'PASSED' || c.status === 'WARNING'))
+      ) {
+        watchlist.push({ ...item, category: 'WATCHLIST' });
+      } else {
+        rejected.push({ ...item, category: 'REJECTED' });
+      }
+    }
+
+    return { bestLong, bestShort, watchlist, rejected, all: results };
+  }, [results, minScore, minNetRR]);
+
+  // Filter and sort items based on current active tab and sorting preference
+  const displayedResults = useMemo(() => {
+    let list: ScannedOpportunity[] = [];
+
+    if (categoryTab === 'best_long') {
+      list = [...categorizedOpportunities.bestLong];
+    } else if (categoryTab === 'best_short') {
+      list = [...categorizedOpportunities.bestShort];
+    } else if (categoryTab === 'watchlist') {
+      list = [...categorizedOpportunities.watchlist];
+    } else {
+      list = [...results];
+    }
+
+    // Secondary direction filter in toolbar
     if (directionFilter === 'LONG') {
       list = list.filter((r) => r.outcome === 'LONG');
     } else if (directionFilter === 'SHORT') {
       list = list.filter((r) => r.outcome === 'SHORT');
     }
 
-    // View filter: validated (score >= 65 and outcome !== NO_TRADE) vs all
-    if (viewFilter === 'validated') {
-      list = list.filter((r) => r.outcome !== 'NO_TRADE' && r.qualityScore.total >= 65);
-    }
-
-    // Search query filter
+    // Search filter
     if (searchFilter.trim()) {
       const q = searchFilter.toUpperCase().trim();
       list = list.filter((r) => r.symbol.includes(q));
     }
 
-    // Sorting
+    // Deterministic sorting
     list.sort((a, b) => {
       if (sortBy === 'score') {
         return b.qualityScore.total - a.qualityScore.total;
@@ -210,10 +280,7 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
     });
 
     return list;
-  }, [results, directionFilter, viewFilter, searchFilter, sortBy]);
-
-  const validatedCount = results.filter((r) => r.outcome !== 'NO_TRADE' && r.qualityScore.total >= 65).length;
-  const noTradeCount = results.filter((r) => r.outcome === 'NO_TRADE' || r.qualityScore.total < 65).length;
+  }, [categorizedOpportunities, categoryTab, directionFilter, searchFilter, sortBy, results]);
 
   return (
     <div className="space-y-6">
@@ -238,7 +305,7 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-1 max-w-3xl leading-relaxed">
-                Explore automatiquement les cryptomonnaies les plus liquides sur Binance, analyse la structure institutionnelle (Order Blocks, FVG, Balayages de liquidité) et filtre les configurations selon la confluence 4H, 1H, 15M et 5M avec calcul complet des TP1, TP2, TP3 et ratios R/R nets après friction.
+                Explore automatiquement les cryptomonnaies négociables sur Binance, analyse la structure institutionnelle (Order Blocks, FVG, Balayages de liquidité, BOS/CHoCH) et filtre les configurations selon la confluence 4H, 1H, 15M et 5M avec calcul complet des TP1, TP2, TP3 et ratios R/R nets après friction.
               </p>
             </div>
           </div>
@@ -258,14 +325,14 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
                 className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center gap-2 shadow-lg shadow-blue-950/40 transition-all cursor-pointer"
               >
                 <Play className="w-4 h-4 fill-current" />
-                <span>Scanner le marché</span>
+                <span>Lancer le scan</span>
               </button>
             )}
           </div>
         </div>
 
         {/* Configuration Filters Toolbar */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 pt-4 mt-4 border-t border-slate-800/80 text-xs">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 pt-4 mt-4 border-t border-slate-800/80 text-xs">
           {/* 1. Market Selection */}
           <div>
             <label className="block text-slate-400 font-medium mb-1 text-[11px]">
@@ -276,19 +343,19 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
                 type="button"
                 onClick={() => handleMarketChange('futures')}
                 disabled={isScanning}
-                className={`flex-1 py-1 rounded text-center font-medium transition-colors cursor-pointer ${
+                className={`flex-1 py-1 rounded text-center font-medium transition-colors cursor-pointer text-xs ${
                   selectedMarket === 'futures'
                     ? 'bg-blue-600 text-white shadow-xs'
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
-                USDⓈ-M Futures
+                Futures
               </button>
               <button
                 type="button"
                 onClick={() => handleMarketChange('spot')}
                 disabled={isScanning}
-                className={`flex-1 py-1 rounded text-center font-medium transition-colors cursor-pointer ${
+                className={`flex-1 py-1 rounded text-center font-medium transition-colors cursor-pointer text-xs ${
                   selectedMarket === 'spot'
                     ? 'bg-blue-600 text-white shadow-xs'
                     : 'text-slate-400 hover:text-slate-200'
@@ -302,7 +369,7 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
           {/* 2. Direction Filter */}
           <div>
             <label className="block text-slate-400 font-medium mb-1 text-[11px]">
-              Direction Recherchée
+              Direction
             </label>
             <select
               value={directionFilter}
@@ -327,45 +394,78 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
               disabled={isScanning}
               className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-200 focus:border-blue-500 focus:outline-hidden font-medium"
             >
-              <option value={1000000}>1M+ USDT (Large sélection)</option>
-              <option value={5000000}>5M+ USDT (Liquidité saine)</option>
-              <option value={10000000}>10M+ USDT (Haute liquidité)</option>
-              <option value={50000000}>50M+ USDT (Mega caps uniquement)</option>
+              <option value={1000000}>1M+ USDT</option>
+              <option value={5000000}>5M+ USDT</option>
+              <option value={10000000}>10M+ USDT</option>
+              <option value={50000000}>50M+ USDT</option>
             </select>
           </div>
 
-          {/* 4. Number of Pairs */}
+          {/* 4. Score Minimum */}
           <div>
             <label className="block text-slate-400 font-medium mb-1 text-[11px]">
-              Étendue du Scan
+              Score Min (/100)
             </label>
             <select
-              value={candidateLimit}
-              onChange={(e) => setCandidateLimit(parseInt(e.target.value, 10))}
+              value={minScore}
+              onChange={(e) => setMinScore(parseInt(e.target.value, 10))}
               disabled={isScanning}
               className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-200 focus:border-blue-500 focus:outline-hidden font-medium"
             >
-              <option value={15}>Top 15 paires (Ultra rapide)</option>
-              <option value={25}>Top 25 paires (Équilibré)</option>
-              <option value={40}>Top 40 paires (Approfondi)</option>
+              <option value={60}>≥ 60 (Modéré)</option>
+              <option value={65}>≥ 65 (Standard PRO)</option>
+              <option value={70}>≥ 70 (Exigeant)</option>
+              <option value={75}>≥ 75 (Haute Confiance)</option>
+              <option value={80}>≥ 80 (Élite SMC)</option>
             </select>
           </div>
 
-          {/* 5. Sort By */}
+          {/* 5. Net R/R Minimum */}
           <div>
             <label className="block text-slate-400 font-medium mb-1 text-[11px]">
-              Trier les Opportunités
+              R/R Net Min
             </label>
             <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as any)}
+              value={minNetRR}
+              onChange={(e) => setMinNetRR(parseFloat(e.target.value))}
+              disabled={isScanning}
               className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-200 focus:border-blue-500 focus:outline-hidden font-medium"
             >
-              <option value="score">Score de Qualité (Décroissant)</option>
-              <option value="netRR">Ratio R/R Net (Meilleur profil)</option>
-              <option value="volume">Volume 24h (Plus liquide)</option>
-              <option value="change">Volatilité 24h (% absolu)</option>
+              <option value={1.2}>≥ 1.2:1 (Tolérant)</option>
+              <option value={1.5}>≥ 1.5:1 (Standard)</option>
+              <option value={1.8}>≥ 1.8:1 (Optimal)</option>
+              <option value={2.0}>≥ 2.0:1 (Asymétrique)</option>
             </select>
+          </div>
+
+          {/* 6. Scan Limit & Sorting */}
+          <div>
+            <label className="block text-slate-400 font-medium mb-1 text-[11px]">
+              Étendue & Tri
+            </label>
+            <div className="grid grid-cols-2 gap-1.5">
+              <select
+                value={candidateLimit}
+                onChange={(e) => setCandidateLimit(parseInt(e.target.value, 10))}
+                disabled={isScanning}
+                className="bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200 focus:border-blue-500 focus:outline-hidden font-medium text-[11px]"
+              >
+                <option value={15}>Top 15</option>
+                <option value={25}>Top 25</option>
+                <option value={40}>Top 40</option>
+              </select>
+
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as any)}
+                className="bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200 focus:border-blue-500 focus:outline-hidden font-medium text-[11px]"
+              >
+                <option value="score">Score</option>
+                <option value="netRR">R/R Net</option>
+                <option value="volume">Volume</option>
+                <option value="change">Volatilité</option>
+              </select>
+            </div>
           </div>
         </div>
 
@@ -401,41 +501,77 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
         )}
       </div>
 
-      {/* Results Header Toolbar (Filter between Validated & All, search input, stats) */}
+      {/* Results Categories Segmented Bar */}
       {results.length > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900 border border-slate-800 px-4 py-3 rounded-xl shadow-lg">
-          <div className="flex items-center gap-2">
+          {/* 3 Categories + All Tab */}
+          <div className="flex items-center flex-wrap gap-2 text-xs">
+            {/* Category 1: Best LONG */}
             <button
-              onClick={() => setViewFilter('validated')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
-                viewFilter === 'validated'
-                  ? 'bg-emerald-950 text-emerald-300 border border-emerald-700/80'
+              onClick={() => setCategoryTab('best_long')}
+              className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
+                categoryTab === 'best_long'
+                  ? 'bg-emerald-950 text-emerald-300 border border-emerald-700/80 shadow-xs'
                   : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
               }`}
             >
-              <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Configurations Validées</span>
-              <span className="px-1.5 py-0.2 rounded font-mono text-[10px] bg-slate-900 border border-current">
-                {validatedCount}
+              <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Opportunités LONG</span>
+              <span className="px-1.5 py-0.2 rounded font-mono text-[10px] bg-slate-900 border border-emerald-700/60 text-emerald-300">
+                {categorizedOpportunities.bestLong.length}
               </span>
             </button>
 
+            {/* Category 2: Best SHORT */}
             <button
-              onClick={() => setViewFilter('all')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
-                viewFilter === 'all'
-                  ? 'bg-blue-950 text-blue-300 border border-blue-700/80'
+              onClick={() => setCategoryTab('best_short')}
+              className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
+                categoryTab === 'best_short'
+                  ? 'bg-rose-950 text-rose-300 border border-rose-700/80 shadow-xs'
+                  : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
+              }`}
+            >
+              <TrendingDown className="w-3.5 h-3.5 text-rose-400" />
+              <span>Opportunités SHORT</span>
+              <span className="px-1.5 py-0.2 rounded font-mono text-[10px] bg-slate-900 border border-rose-700/60 text-rose-300">
+                {categorizedOpportunities.bestShort.length}
+              </span>
+            </button>
+
+            {/* Category 3: Watchlist / Incomplete */}
+            <button
+              onClick={() => setCategoryTab('watchlist')}
+              className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
+                categoryTab === 'watchlist'
+                  ? 'bg-amber-950 text-amber-300 border border-amber-700/80 shadow-xs'
+                  : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
+              }`}
+            >
+              <Eye className="w-3.5 h-3.5 text-amber-400" />
+              <span>À Surveiller (Incomplètes)</span>
+              <span className="px-1.5 py-0.2 rounded font-mono text-[10px] bg-slate-900 border border-amber-700/60 text-amber-300">
+                {categorizedOpportunities.watchlist.length}
+              </span>
+            </button>
+
+            {/* Category 4: All pairs & rejections */}
+            <button
+              onClick={() => setCategoryTab('all')}
+              className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
+                categoryTab === 'all'
+                  ? 'bg-blue-950 text-blue-300 border border-blue-700/80 shadow-xs'
                   : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
               }`}
             >
               <Layers className="w-3.5 h-3.5 text-blue-400" />
               <span>Toutes les Paires ({results.length})</span>
-              <span className="px-1.5 py-0.2 rounded font-mono text-[10px] bg-slate-900 border border-current">
-                {noTradeCount} NO TRADE
+              <span className="px-1.5 py-0.2 rounded font-mono text-[10px] bg-slate-900 border border-slate-700 text-slate-400">
+                {categorizedOpportunities.rejected.length} Rejetées
               </span>
             </button>
           </div>
 
+          {/* Search by Symbol & Freshness */}
           <div className="flex items-center gap-3">
             <div className="relative">
               <Search className="w-3.5 h-3.5 absolute left-2.5 top-2 text-slate-500" />
@@ -444,14 +580,14 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
                 placeholder="Filtrer par symbole..."
                 value={searchFilter}
                 onChange={(e) => setSearchFilter(e.target.value)}
-                className="bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1 text-xs text-slate-200 font-mono focus:border-blue-500 focus:outline-hidden w-44"
+                className="bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1 text-xs text-slate-200 font-mono focus:border-blue-500 focus:outline-hidden w-40 sm:w-44"
               />
             </div>
 
             {scanTimestamp && (
-              <span className="text-[11px] text-slate-500 font-mono flex items-center gap-1">
-                <Clock className="w-3 h-3" />
-                {new Date(scanTimestamp).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+              <span className="text-[11px] text-slate-400 font-mono flex items-center gap-1.5 bg-slate-950 px-2.5 py-1 rounded-lg border border-slate-800">
+                <Clock className="w-3 h-3 text-blue-400" />
+                <span>Mis à jour : {new Date(scanTimestamp).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
               </span>
             )}
           </div>
@@ -470,7 +606,7 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
               Aucun scan en cours
             </h3>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Sélectionnez vos critères ci-dessus puis cliquez sur « Scanner le marché » pour analyser en direct les {candidateLimit} paires les plus liquides de Binance.
+              Sélectionnez vos critères de marché ci-dessus puis cliquez sur « Lancer le scan » pour analyser en direct les {candidateLimit} paires les plus liquides de Binance avec filtrage institutionnel SMC / MTF.
             </p>
           </div>
           <button
@@ -478,62 +614,89 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
             className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs inline-flex items-center gap-2 shadow-lg shadow-blue-950/40 transition-all cursor-pointer"
           >
             <Play className="w-4 h-4 fill-current" />
-            <span>Lancer un premier scan</span>
+            <span>Lancer le scan Binance</span>
           </button>
         </div>
-      ) : filteredAndSortedResults.length === 0 ? (
-        /* Rigorous Capital-Preservation Empty State: No opportunities match current filter */
+      ) : displayedResults.length === 0 && !isScanning ? (
+        /* Capital-Preservation Empty State: No opportunities match current tab / filters */
         <div className="bg-slate-900 border border-amber-900/60 rounded-xl p-8 text-center space-y-4 shadow-xl">
           <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 mx-auto">
             <ShieldAlert className="w-7 h-7" />
           </div>
           <div className="max-w-lg mx-auto space-y-2">
             <h3 className="text-sm font-bold text-amber-300 uppercase tracking-wide">
-              Aucune opportunité ne satisfait les critères d'exigence
+              {categoryTab === 'best_long'
+                ? 'Aucune opportunité LONG ne satisfait les critères stricts'
+                : categoryTab === 'best_short'
+                ? 'Aucune opportunité SHORT ne satisfait les critères stricts'
+                : categoryTab === 'watchlist'
+                ? 'Aucune configuration incomplète à surveiller'
+                : 'Aucune opportunité ne correspond à ces critères'}
             </h3>
             <p className="text-xs text-slate-300 leading-relaxed">
-              Sur les <span className="font-mono font-bold text-slate-100">{results.length}</span> cryptomonnaies scannées, aucune ne réunit actuellement une confluence technique suffisante (Score &ge; 65/100, structure SMC alignée, et ratio R/R net réel après frais &ge; 1,2:1).
+              Sur les <span className="font-mono font-bold text-slate-100">{results.length}</span> cryptomonnaies scannées, aucune ne réunit actuellement une confluence technique suffisante (Score &ge; {minScore}/100, R/R net réel après frais &ge; {minNetRR}:1 et structure SMC alignée).
             </p>
             <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-lg text-[11px] text-slate-400 text-left space-y-1">
-              <span className="font-semibold text-slate-200 block">Règle Crypto Edge AI de Préservation du Capital :</span>
+              <span className="font-semibold text-slate-200 block">Règle d'Or de Préservation du Capital :</span>
               <p>
-                Ne jamais forcer un trade dans un marché en consolidation ou sans avantage asymétrique net. Cliquez sur « Toutes les Paires » ci-dessus pour inspecter les motifs d'invalidation détaillés de chaque crypto.
+                Ne jamais forcer un trade dans un marché en consolidation ou sans avantage asymétrique net. Cliquez sur « À Surveiller » ou « Toutes les Paires » pour inspecter les motifs d'invalidation détaillés de chaque crypto.
               </p>
             </div>
           </div>
-          <button
-            onClick={() => setViewFilter('all')}
-            className="px-4 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-300 hover:text-white text-xs font-medium cursor-pointer"
-          >
-            Voir les {results.length} paires analysées et leurs motifs de rejet
-          </button>
+          <div className="flex items-center justify-center gap-2">
+            <button
+              onClick={() => setCategoryTab('watchlist')}
+              className="px-4 py-2 rounded-lg bg-amber-950/60 border border-amber-700/60 text-amber-300 hover:text-white text-xs font-medium cursor-pointer"
+            >
+              Voir les configurations à surveiller ({categorizedOpportunities.watchlist.length})
+            </button>
+            <button
+              onClick={() => setCategoryTab('all')}
+              className="px-4 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-300 hover:text-white text-xs font-medium cursor-pointer"
+            >
+              Voir toutes les {results.length} paires analysées
+            </button>
+          </div>
         </div>
       ) : (
         /* Classified Opportunities Grid */
         <div className="space-y-4">
           <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center justify-between">
             <span>
-              {filteredAndSortedResults.length} configuration{filteredAndSortedResults.length > 1 ? 's' : ''} affichée{filteredAndSortedResults.length > 1 ? 's' : ''} (Triée{filteredAndSortedResults.length > 1 ? 's' : ''} par {sortBy === 'score' ? 'score technique' : sortBy === 'netRR' ? 'R/R net' : sortBy === 'volume' ? 'volume' : 'volatilité'})
+              {displayedResults.length} configuration{displayedResults.length > 1 ? 's' : ''} dans la catégorie{' '}
+              <strong className="text-slate-200">
+                {categoryTab === 'best_long'
+                  ? 'Opportunités LONG'
+                  : categoryTab === 'best_short'
+                  ? 'Opportunités SHORT'
+                  : categoryTab === 'watchlist'
+                  ? 'À Surveiller'
+                  : 'Toutes les Paires'}
+              </strong>
             </span>
-            <span className="text-[11px] font-normal text-slate-500">
-              Cliquez sur « Analyser » pour basculer sur le graphique détaillé
+            <span className="text-[11px] font-normal text-slate-500 hidden sm:inline">
+              Trié par {sortBy === 'score' ? 'score technique' : sortBy === 'netRR' ? 'R/R net' : sortBy === 'volume' ? 'volume' : 'volatilité'}
             </span>
           </div>
 
           <div className="grid grid-cols-1 gap-4">
-            {filteredAndSortedResults.map((item, index) => {
+            {displayedResults.map((item, index) => {
               const hasSetup = item.outcome !== 'NO_TRADE' && item.setup;
               const isLong = item.outcome === 'LONG';
               const isShort = item.outcome === 'SHORT';
+              const isWatchlist = !hasSetup && item.qualityScore.total >= 45;
+              const isRefreshing = refreshingSymbols.has(item.symbol);
 
               return (
                 <div
                   key={`${item.market}-${item.symbol}`}
                   className={`bg-slate-900 border rounded-xl overflow-hidden shadow-xl transition-all hover:border-slate-700 ${
-                    isLong
+                    isLong && hasSetup
                       ? 'border-emerald-900/60'
-                      : isShort
+                      : isShort && hasSetup
                       ? 'border-rose-900/60'
+                      : isWatchlist
+                      ? 'border-amber-900/50'
                       : 'border-slate-800'
                   }`}
                 >
@@ -554,6 +717,30 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
                           <span className="text-[10px] px-1.5 py-0.2 rounded font-mono font-bold bg-slate-900 border border-slate-700 text-slate-300">
                             {item.market === 'futures' ? 'FUTURES' : 'SPOT'}
                           </span>
+                          {/* Timeframe Badges (4H, 1H, 15M, 5M) */}
+                          <div className="hidden sm:flex items-center gap-1 ml-2">
+                            {(['4h', '1h', '15m', '5m'] as Timeframe[]).map((tf) => {
+                              const snap = item.snapshots?.[tf];
+                              const trend = snap?.trend;
+                              const isBull = trend === 'HAUSSIÈRE';
+                              const isBear = trend === 'BAISSIÈRE';
+                              return (
+                                <span
+                                  key={tf}
+                                  title={`${tf.toUpperCase()}: ${trend || 'Neutre'}`}
+                                  className={`px-1.5 py-0.2 rounded text-[9px] font-mono font-bold ${
+                                    isBull
+                                      ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/80'
+                                      : isBear
+                                      ? 'bg-rose-950/80 text-rose-400 border border-rose-800/80'
+                                      : 'bg-slate-900 text-slate-500 border border-slate-800'
+                                  }`}
+                                >
+                                  {tf.toUpperCase()}
+                                </span>
+                              );
+                            })}
+                          </div>
                         </div>
                         <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono mt-0.5">
                           <span>Vol 24h: {(item.quoteVolume24h / 1000000).toFixed(1)}M$</span>
@@ -570,27 +757,37 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
                       </div>
                     </div>
 
-                    {/* Verdict & Score Badges + Direct Action Button */}
-                    <div className="flex items-center gap-3">
+                    {/* Verdict & Score Badges + Direct Action Buttons */}
+                    <div className="flex items-center gap-2.5">
                       {/* Direction Badge */}
                       <span
                         className={`px-3 py-1 rounded-lg text-xs font-mono font-bold flex items-center gap-1.5 ${
-                          isLong
+                          isLong && hasSetup
                             ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                            : isShort
+                            : isShort && hasSetup
                             ? 'bg-rose-950 text-rose-300 border border-rose-800'
+                            : isWatchlist
+                            ? 'bg-amber-950 text-amber-300 border border-amber-800'
                             : 'bg-slate-800 text-slate-400 border border-slate-700'
                         }`}
                       >
-                        {isLong ? (
+                        {isLong && hasSetup ? (
                           <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
-                        ) : isShort ? (
+                        ) : isShort && hasSetup ? (
                           <TrendingDown className="w-3.5 h-3.5 text-rose-400" />
+                        ) : isWatchlist ? (
+                          <Eye className="w-3.5 h-3.5 text-amber-400" />
                         ) : (
                           <ShieldAlert className="w-3.5 h-3.5 text-slate-400" />
                         )}
                         <span>
-                          {isLong ? 'CONFIG LONG' : isShort ? 'CONFIG SHORT' : 'NO TRADE'}
+                          {isLong && hasSetup
+                            ? 'CONFIG LONG'
+                            : isShort && hasSetup
+                            ? 'CONFIG SHORT'
+                            : isWatchlist
+                            ? 'À SURVEILLER'
+                            : 'NO TRADE'}
                         </span>
                       </span>
 
@@ -603,18 +800,30 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
                               ? 'text-emerald-400'
                               : item.qualityScore.total >= 65
                               ? 'text-blue-400'
-                              : 'text-amber-400'
+                              : item.qualityScore.total >= 50
+                              ? 'text-amber-400'
+                              : 'text-slate-400'
                           }`}
                         >
                           {item.qualityScore.total}/100
                         </span>
                       </div>
 
+                      {/* Individual Refresh Pair Button */}
+                      <button
+                        onClick={() => refreshSinglePair(item.symbol, item.market)}
+                        disabled={isRefreshing}
+                        title="Actualiser les cotations et l'analyse de cette paire en direct"
+                        className="p-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-50 cursor-pointer"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-blue-400' : ''}`} />
+                      </button>
+
                       {/* Select Pair Action Button */}
                       <button
                         onClick={() => onSelectPair(item.symbol, item.market)}
                         className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center gap-1.5 shadow-md shadow-blue-950/50 transition-all cursor-pointer"
-                        title="Ouvrir l'analyse détaillée et les graphiques de cette paire"
+                        title="Ouvrir l'analyse détaillée et les graphiques de cette paire dans le Dashboard"
                       >
                         <span>Analyser cette crypto</span>
                         <ArrowRight className="w-3.5 h-3.5" />
@@ -625,91 +834,135 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
                   {/* Card Body */}
                   <div className="p-4 space-y-4">
                     {hasSetup && item.setup ? (
-                      /* Active Trade Levels Strip */
-                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-xs">
-                        {/* Entry */}
-                        <div className="p-2.5 bg-slate-950/80 border border-blue-900/40 rounded-lg">
-                          <span className="text-[10px] text-blue-400 block font-semibold uppercase">Entrée</span>
-                          <span className="font-mono font-bold text-slate-100 text-sm">
-                            {formatCryptoPrice(item.setup.entryPrice, item.tickSize)}$
-                          </span>
-                        </div>
-
-                        {/* Stop Loss */}
-                        <div className="p-2.5 bg-slate-950/80 border border-rose-900/40 rounded-lg">
-                          <span className="text-[10px] text-rose-400 block font-semibold uppercase">
-                            Stop Loss (-{item.setup.riskPercent.toFixed(2)}%)
-                          </span>
-                          <span className="font-mono font-bold text-rose-300 text-sm">
-                            {formatCryptoPrice(item.setup.stopLoss, item.tickSize)}$
-                          </span>
-                        </div>
-
-                        {/* TP1 */}
-                        <div className="p-2.5 bg-slate-950/80 border border-emerald-900/40 rounded-lg">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] text-emerald-400 font-semibold uppercase">TP1</span>
-                            <span className="text-[9px] font-mono text-emerald-300 bg-emerald-950 px-1 rounded">
-                              Net {item.setup.netRiskRewardRatioTP1}:1
+                      /* Active Trade Levels Strip with Unit Risk & Gains */
+                      <div className="space-y-2.5">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-xs">
+                          {/* Entry */}
+                          <div className="p-2.5 bg-slate-950/80 border border-blue-900/40 rounded-lg">
+                            <span className="text-[10px] text-blue-400 block font-semibold uppercase">Entrée Indicative</span>
+                            <span className="font-mono font-bold text-slate-100 text-sm">
+                              {formatCryptoPrice(item.setup.entryPrice, item.tickSize)}$
+                            </span>
+                            <span className="text-[9px] text-slate-400 block mt-0.5 font-mono">
+                              Zone: {item.setup.entryZone.split('-')[0].trim() || 'Actuel'}
                             </span>
                           </div>
-                          <span className="font-mono font-bold text-emerald-300 text-sm">
-                            {formatCryptoPrice(item.setup.takeProfit1, item.tickSize)}$
-                          </span>
-                        </div>
 
-                        {/* TP2 */}
-                        <div className="p-2.5 bg-slate-950/80 border border-emerald-900/30 rounded-lg">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] text-emerald-400 font-semibold uppercase">TP2</span>
-                            <span className="text-[9px] font-mono text-emerald-300 bg-emerald-950 px-1 rounded">
-                              Net {item.setup.netRiskRewardRatioTP2 ?? item.setup.riskRewardRatioTP2}:1
-                            </span>
-                          </div>
-                          <span className="font-mono font-bold text-emerald-300 text-sm">
-                            {formatCryptoPrice(item.setup.takeProfit2, item.tickSize)}$
-                          </span>
-                        </div>
-
-                        {/* TP3 */}
-                        {item.setup.takeProfit3 !== undefined && (
-                          <div className="p-2.5 bg-slate-950/80 border border-emerald-900/30 rounded-lg">
+                          {/* Stop Loss */}
+                          <div className="p-2.5 bg-slate-950/80 border border-rose-900/40 rounded-lg">
                             <div className="flex items-center justify-between">
-                              <span className="text-[10px] text-emerald-400 font-semibold uppercase">TP3</span>
-                              <span className="text-[9px] font-mono text-emerald-300 bg-emerald-950 px-1 rounded">
-                                Net {item.setup.netRiskRewardRatioTP3 ?? (item.setup.riskRewardRatioTP3 ? item.setup.riskRewardRatioTP3 * 0.95 : 4.4)}:1
+                              <span className="text-[10px] text-rose-400 font-semibold uppercase">Stop Loss</span>
+                              <span className="text-[9px] font-mono text-rose-400">
+                                -{item.setup.riskPercent.toFixed(2)}%
+                              </span>
+                            </div>
+                            <span className="font-mono font-bold text-rose-300 text-sm">
+                              {formatCryptoPrice(item.setup.stopLoss, item.tickSize)}$
+                            </span>
+                            <span className="text-[9px] text-slate-400 block mt-0.5 font-mono">
+                              Risque: {formatCryptoPrice(item.setup.unitRisk ?? Math.abs(item.setup.entryPrice - item.setup.stopLoss), item.tickSize)}$ / unité
+                            </span>
+                          </div>
+
+                          {/* TP1 */}
+                          <div className="p-2.5 bg-slate-950/80 border border-emerald-900/40 rounded-lg">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] text-emerald-400 font-semibold uppercase">TP1</span>
+                              <span className="text-[9px] font-mono text-emerald-300 bg-emerald-950 px-1 rounded font-bold">
+                                Net {item.setup.netRiskRewardRatioTP1}:1
                               </span>
                             </div>
                             <span className="font-mono font-bold text-emerald-300 text-sm">
-                              {formatCryptoPrice(item.setup.takeProfit3, item.tickSize)}$
+                              {formatCryptoPrice(item.setup.takeProfit1, item.tickSize)}$
+                            </span>
+                            <span className="text-[9px] text-slate-400 block mt-0.5 font-mono">
+                              Gain: +{item.setup.grossGainPercentTP1}% (+{formatCryptoPrice(item.setup.unitGainTP1 ?? Math.abs(item.setup.takeProfit1 - item.setup.entryPrice), item.tickSize)}$)
                             </span>
                           </div>
-                        )}
 
-                        {/* Overall R/R Net Summary Pill */}
-                        <div className="p-2.5 bg-slate-950/80 border border-indigo-900/40 rounded-lg">
-                          <span className="text-[10px] text-indigo-400 block font-semibold uppercase">R/R Brut / Net</span>
-                          <span className="font-mono font-bold text-slate-100 text-sm">
-                            {item.setup.riskRewardRatioTP1}:1 / {item.setup.netRiskRewardRatioTP1}:1
+                          {/* TP2 */}
+                          <div className="p-2.5 bg-slate-950/80 border border-emerald-900/30 rounded-lg">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] text-emerald-400 font-semibold uppercase">TP2</span>
+                              <span className="text-[9px] font-mono text-emerald-300 bg-emerald-950 px-1 rounded font-bold">
+                                Net {item.setup.netRiskRewardRatioTP2 ?? item.setup.riskRewardRatioTP2}:1
+                              </span>
+                            </div>
+                            <span className="font-mono font-bold text-emerald-300 text-sm">
+                              {formatCryptoPrice(item.setup.takeProfit2, item.tickSize)}$
+                            </span>
+                            <span className="text-[9px] text-slate-400 block mt-0.5 font-mono">
+                              Gain: +{item.setup.grossGainPercentTP2 ?? (item.setup.grossGainPercentTP1 * 1.6).toFixed(1)}% (+{formatCryptoPrice(item.setup.unitGainTP2 ?? Math.abs(item.setup.takeProfit2 - item.setup.entryPrice), item.tickSize)}$)
+                            </span>
+                          </div>
+
+                          {/* TP3 */}
+                          {item.setup.takeProfit3 !== undefined && (
+                            <div className="p-2.5 bg-slate-950/80 border border-emerald-900/30 rounded-lg">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] text-emerald-400 font-semibold uppercase">TP3</span>
+                                <span className="text-[9px] font-mono text-emerald-300 bg-emerald-950 px-1 rounded font-bold">
+                                  Net {item.setup.netRiskRewardRatioTP3 ?? (item.setup.riskRewardRatioTP3 ? (item.setup.riskRewardRatioTP3 * 0.96).toFixed(2) : 4.4)}:1
+                                </span>
+                              </div>
+                              <span className="font-mono font-bold text-emerald-300 text-sm">
+                                {formatCryptoPrice(item.setup.takeProfit3, item.tickSize)}$
+                              </span>
+                              <span className="text-[9px] text-slate-400 block mt-0.5 font-mono">
+                                Gain: +{item.setup.grossGainPercentTP3 ?? (item.setup.grossGainPercentTP1 * 2.4).toFixed(1)}% (+{formatCryptoPrice(item.setup.unitGainTP3 ?? Math.abs(item.setup.takeProfit3 - item.setup.entryPrice), item.tickSize)}$)
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Friction & Overall R/R Net Summary */}
+                          <div className="p-2.5 bg-slate-950/80 border border-indigo-900/40 rounded-lg">
+                            <span className="text-[10px] text-indigo-400 block font-semibold uppercase">Frais & Slippage</span>
+                            <span className="font-mono font-bold text-slate-100 text-xs block mt-0.5">
+                              Frais A/R : {item.setup.estimatedFeesPercent ?? (item.market === 'futures' ? 0.08 : 0.20)}%
+                            </span>
+                            <span className="text-[9px] text-slate-400 block font-mono">
+                              Slippage : {item.setup.estimatedSlippagePercent ?? 0.05}%
+                            </span>
+                            <span className="text-[9px] text-indigo-300 font-semibold block mt-1">
+                              R/R Brut: {item.setup.riskRewardRatioTP1}:1 | Net: {item.setup.netRiskRewardRatioTP1}:1
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Invalidation Condition Alert */}
+                        <div className="p-2.5 bg-slate-950 border border-slate-800 rounded-lg flex items-center justify-between gap-3 text-xs">
+                          <span className="text-slate-400 text-[11px]">
+                            <strong className="text-slate-300">Condition d'invalidation : </strong>
+                            {item.setup.invalidationCondition}
                           </span>
+                          {item.setup.confirmedTimeframes && item.setup.confirmedTimeframes.length > 0 && (
+                            <span className="text-[10px] text-emerald-400 font-mono shrink-0">
+                              Timeframes confirmés : {item.setup.confirmedTimeframes.join(', ')}
+                            </span>
+                          )}
                         </div>
                       </div>
                     ) : (
-                      /* Disqualification Reasons Banner when NO TRADE */
-                      <div className="p-3 bg-amber-950/20 border border-amber-900/50 rounded-lg text-xs space-y-1">
-                        <span className="font-semibold text-amber-300 flex items-center gap-1.5 uppercase text-[11px]">
-                          <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
-                          Motifs d'invalidation (Capital préservé) :
-                        </span>
+                      /* Disqualification Reasons Banner when NO TRADE or Incomplete */
+                      <div className="p-3 bg-amber-950/20 border border-amber-900/50 rounded-lg text-xs space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-amber-300 flex items-center gap-1.5 uppercase text-[11px]">
+                            <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+                            {isWatchlist ? 'Configuration en cours de formation (À Surveiller) :' : 'Motifs d\'invalidation (Capital préservé) :'}
+                          </span>
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            Dernier tick : il y a {item.stalenessSeconds || 0}s
+                          </span>
+                        </div>
                         <ul className="text-slate-300 space-y-0.5 list-disc list-inside">
-                          {item.noTradeReasons.slice(0, 2).map((reason, rIdx) => (
+                          {item.noTradeReasons.slice(0, 3).map((reason, rIdx) => (
                             <li key={rIdx} className="leading-snug">{reason}</li>
                           ))}
                         </ul>
                       </div>
                     )}
 
-                    {/* Confluences & Risks Chips */}
+                    {/* Confluences & Quality Breakdown Footer */}
                     <div className="flex flex-wrap items-center justify-between gap-3 text-xs pt-1">
                       {item.setup && item.setup.keyConfluences.length > 0 ? (
                         <div className="flex items-center gap-1.5 flex-wrap">
@@ -747,7 +1000,7 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
         </div>
       )}
 
-      {/* Safety Notice */}
+      {/* Safety & Compliance Notice */}
       <div className="p-4 bg-slate-950/70 border border-slate-800 rounded-xl flex items-start gap-3 text-xs text-slate-400 leading-relaxed shadow-lg">
         <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
         <div>
