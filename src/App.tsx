@@ -23,6 +23,8 @@ import { ChartVisionUploader } from './components/ChartVisionUploader';
 import { RiskCalculator } from './components/RiskCalculator';
 import { BacktestModule } from './components/BacktestModule';
 import { MarketScanner } from './components/MarketScanner';
+import { NewsIntelligence } from './components/NewsIntelligence';
+import { NewsSentimentWidget } from './components/NewsSentimentWidget';
 import { AnalysisHistoryModal } from './components/AnalysisHistoryModal';
 import {
   Search,
@@ -43,6 +45,7 @@ import {
   Wifi,
   WifiOff,
   Radar,
+  Newspaper,
 } from 'lucide-react';
 
 const POPULAR_PAIRS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT', 'AVAXUSDT', 'SUIUSDT'];
@@ -51,7 +54,7 @@ export default function App() {
   const [symbol, setSymbol] = useState<string>('BTCUSDT');
   const [searchInput, setSearchInput] = useState<string>('BTCUSDT');
   const [market, setMarket] = useState<MarketType>('futures');
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'scanner' | 'vision' | 'calculator' | 'backtest'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'scanner' | 'news' | 'vision' | 'calculator' | 'backtest'>('dashboard');
 
   // Real-time high-frequency WebSocket + REST stream with mobile lifecycle & race condition guards
   const {
@@ -740,6 +743,21 @@ export default function App() {
             </button>
 
             <button
+              onClick={() => setActiveTab('news')}
+              className={`py-3 px-3 border-b-2 flex items-center gap-2 transition-colors ${
+                activeTab === 'news'
+                  ? 'border-blue-500 text-blue-400 font-semibold'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Newspaper className="w-4 h-4 text-amber-400" />
+              <span>News Intelligence</span>
+              <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 font-mono">
+                DARIJA
+              </span>
+            </button>
+
+            <button
               onClick={() => setActiveTab('vision')}
               className={`py-3 px-3 border-b-2 flex items-center gap-2 transition-colors ${
                 activeTab === 'vision'
@@ -868,6 +886,16 @@ export default function App() {
                   </p>
                 </div>
               )}
+
+              {/* Live News Sentiment & Moroccan Darija Confluence Widget */}
+              <NewsSentimentWidget
+                symbol={symbol}
+                market={market}
+                technicalVerdict={evaluation?.outcome || 'NO_TRADE'}
+                technicalScore={evaluation?.qualityScore.total || 0}
+                setup={evaluation?.setup}
+                onOpenNewsTab={() => setActiveTab('news')}
+              />
             </div>
           </div>
         )}
@@ -878,6 +906,25 @@ export default function App() {
             <MarketScanner
               currentMarket={market}
               onSelectPair={handleSelectFromScanner}
+            />
+          </div>
+        )}
+
+        {/* Tab: Crypto News Intelligence in Moroccan Darija */}
+        {activeTab === 'news' && (
+          <div className="space-y-5">
+            <NewsIntelligence
+              currentSymbol={symbol}
+              currentMarket={market}
+              currentPrice={ticker?.price || 0}
+              technicalVerdict={evaluation?.outcome || 'NO_TRADE'}
+              technicalScore={evaluation?.qualityScore.total || 0}
+              setup={evaluation?.setup}
+              onSelectPair={(newSymbol, newMarket) => {
+                setSymbol(newSymbol);
+                setMarket(newMarket);
+              }}
+              onNavigateToDashboard={() => setActiveTab('dashboard')}
             />
           </div>
         )}

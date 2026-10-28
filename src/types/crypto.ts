@@ -285,3 +285,49 @@ export interface ScannerFilterOptions {
   minNetRR: number;
 }
 
+export interface CryptoNewsItem {
+  id: string;
+  title: string;
+  source: string;
+  sourceUrl: string;
+  publishedAt: number;
+  publishedDateStr: string;
+  description: string;
+  coin?: string;
+  isOfficial: boolean;
+  language: string;
+  isCoinSpecific?: boolean;
+  category?: 'COIN_SPECIFIC' | 'MACRO_MARKET';
+  impactScore: number; // -100 to +100
+  impactLabel: 'FORTEMENT_POSITIF' | 'POSITIF' | 'NEUTRE' | 'NEGATIF' | 'FORTEMENT_NEGATIF';
+  isConfirmed: boolean;
+  sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  darijaExplanation?: {
+    whatHappened: string; // شنو وقع؟
+    whyImportant: string; // علاش هاد الخبر مهم لهاد العملة؟
+    sentimentVerdict: string; // واش الخبر إيجابي، سلبي، ولا محايد؟
+    priceImpact: string; // واش ممكن يأثر على السعر على المدى القصير أو المتوسط؟
+    isConfirmedVsRumor: string; // واش الخبر مؤكد ولا غير إشاعة؟
+    risksToWatch: string; // شنو المخاطر اللي خاص المتداول ينتبه ليها؟
+  };
+}
+
+export interface NewsIntelligenceSummary {
+  symbol: string;
+  overallImpactScore: number; // -100 to +100
+  confidenceScore: number; // 0 to 100%
+  dominantSentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'CONFLICTING';
+  sentimentLabel: string;
+  totalArticlesAnalyzed: number;
+  coinSpecificArticlesCount?: number;
+  officialSourcesCount: number;
+  lastUpdated: number;
+  generalSummaryDarija: string;
+  keyCatalysts: string[];
+  mainRisks: string[];
+  combinedVerdict: 'LONG' | 'SHORT' | 'WAIT' | 'NO_TRADE';
+  verdictRationale: string;
+  verdictRationaleDarija: string;
+}
+
+

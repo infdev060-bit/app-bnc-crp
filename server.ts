@@ -6,7 +6,8 @@ import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { generateTimeframeSnapshot } from './src/utils/indicators';
 import { evaluateMarketSetup } from './src/utils/tradeValidator';
-import { IndicatorSnapshot, Timeframe, TickerData, MarketType } from './src/types/crypto';
+import { calculateNewsImpactScore, generateDarijaExplanation, isArticleMatchingCoin, isSimilarStory } from './src/utils/newsAnalyzer';
+import { IndicatorSnapshot, Timeframe, TickerData, MarketType, CryptoNewsItem, NewsIntelligenceSummary } from './src/types/crypto';
 
 dotenv.config();
 
@@ -584,6 +585,360 @@ app.get('/api/market/search-symbols', async (req, res) => {
   }
 
   return res.json({ query, results: matches });
+});
+
+// ============================================================================
+// MODULE: CRYPTO NEWS INTELLIGENCE — LIVE ENGLISH FEEDS + MOROCCAN DARIJA
+// ============================================================================
+
+let globalNewsCache: {
+  timestamp: number;
+  items: CryptoNewsItem[];
+} | null = null;
+
+function parseRssXml(xml: string, sourceName: string): CryptoNewsItem[] {
+  const items: CryptoNewsItem[] = [];
+  const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
+  let match;
+  let idx = 0;
+  while ((match = itemRegex.exec(xml)) !== null && items.length < 25) {
+    const itemContent = match[1];
+    const titleMatch = /<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/i.exec(itemContent);
+    const linkMatch = /<link>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/link>/i.exec(itemContent);
+    const pubDateMatch = /<pubDate>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/pubDate>/i.exec(itemContent);
+    const descMatch = /<description>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/description>/i.exec(itemContent);
+
+    if (titleMatch && linkMatch) {
+      const title = titleMatch[1]
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&#39;/g, "'")
+        .replace(/&quot;/g, '"')
+        .trim();
+      const link = linkMatch[1].trim();
+      const pubDate = pubDateMatch ? pubDateMatch[1].trim() : '';
+      const rawDesc = descMatch ? descMatch[1].replace(/<[^>]+>/g, '').trim() : '';
+      const publishedAt = pubDate ? new Date(pubDate).getTime() || Date.now() : Date.now();
+      const scored = calculateNewsImpactScore({ title, description: rawDesc, source: sourceName, isOfficial: false, publishedAt });
+
+      items.push({
+        id: `news-${sourceName.toLowerCase()}-${publishedAt}-${idx++}`,
+        title,
+        source: sourceName,
+        sourceUrl: link,
+        publishedAt,
+        publishedDateStr: pubDate || new Date(publishedAt).toISOString(),
+        description: rawDesc.slice(0, 350),
+        isOfficial: false,
+        language: 'EN',
+        impactScore: scored.impactScore,
+        impactLabel: scored.impactLabel,
+        isConfirmed: scored.isConfirmed,
+        sentiment: scored.sentiment,
+      });
+    }
+  }
+  return items;
+}
+
+async function fetchAllLiveCryptoNews(): Promise<CryptoNewsItem[]> {
+  const now = Date.now();
+  if (globalNewsCache && now - globalNewsCache.timestamp < 90000) {
+    return globalNewsCache.items;
+  }
+
+  const results: CryptoNewsItem[] = [];
+
+  try {
+    const [ctRes, cdRes, bnGeneral, bnListings] = await Promise.allSettled([
+      // 1. CoinTelegraph RSS
+      fetch('https://cointelegraph.com/rss').then((r) => r.text()),
+      // 2. CoinDesk RSS
+      fetch('https://www.coindesk.com/arc/outboundfeeds/rss/').then((r) => r.text()),
+      // 3. Binance Official Announcements (General activities)
+      fetch('https://www.binance.com/bapi/composite/v1/public/cms/article/catalog/list/query?catalogId=48&pageNo=1&pageSize=12', {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      }).then((r) => r.json()),
+      // 4. Binance New Listings & Delistings
+      fetch('https://www.binance.com/bapi/composite/v1/public/cms/article/catalog/list/query?catalogId=49&pageNo=1&pageSize=12', {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      }).then((r) => r.json()),
+    ]);
+
+    // Process Binance Official
+    const bnArticles = [
+      ...(bnGeneral.status === 'fulfilled' ? bnGeneral.value?.data?.articles || [] : []),
+      ...(bnListings.status === 'fulfilled' ? bnListings.value?.data?.articles || [] : []),
+    ];
+
+    for (let i = 0; i < bnArticles.length; i++) {
+      const art = bnArticles[i];
+      if (!art || !art.title) continue;
+      const title = art.title.trim();
+      const publishedAt = art.releaseDate || (now - i * 3600000);
+      const scored = calculateNewsImpactScore({ title, description: title, source: 'Binance Official', isOfficial: true, publishedAt });
+
+      results.push({
+        id: `news-binance-${art.code || i}`,
+        title,
+        source: 'Binance Official',
+        sourceUrl: `https://www.binance.com/en/support/announcement/${art.code || ''}`,
+        publishedAt,
+        publishedDateStr: new Date(publishedAt).toISOString(),
+        description: `Annonce officielle Binance : ${title}`,
+        isOfficial: true,
+        language: 'EN',
+        impactScore: scored.impactScore,
+        impactLabel: scored.impactLabel,
+        isConfirmed: true,
+        sentiment: scored.sentiment,
+      });
+    }
+
+    // Process CoinTelegraph RSS
+    if (ctRes.status === 'fulfilled' && typeof ctRes.value === 'string') {
+      const ctItems = parseRssXml(ctRes.value, 'CoinTelegraph');
+      results.push(...ctItems);
+    }
+
+    // Process CoinDesk RSS
+    if (cdRes.status === 'fulfilled' && typeof cdRes.value === 'string') {
+      const cdItems = parseRssXml(cdRes.value, 'CoinDesk');
+      results.push(...cdItems);
+    }
+
+    // Deduplicate by exact normalized title AND story similarity (Jaccard token overlap)
+    const uniqueResults: CryptoNewsItem[] = [];
+    for (const item of results) {
+      const normalized = item.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const isDuplicate = uniqueResults.some(
+        (existing) =>
+          existing.title.toLowerCase().replace(/[^a-z0-9]/g, '') === normalized ||
+          isSimilarStory(existing.title, item.title)
+      );
+
+      if (!isDuplicate) {
+        uniqueResults.push(item);
+      }
+    }
+
+    // Sort descending by publication date
+    uniqueResults.sort((a, b) => b.publishedAt - a.publishedAt);
+
+    globalNewsCache = {
+      timestamp: now,
+      items: uniqueResults,
+    };
+
+    return uniqueResults;
+  } catch (err: any) {
+    console.error('[News Intelligence Engine Error]:', err?.message);
+    return globalNewsCache ? globalNewsCache.items : [];
+  }
+}
+
+// API: Get live crypto news with Moroccan Darija breakdown for the target coin
+app.get('/api/news/crypto', async (req, res) => {
+  const symbol = ((req.query.symbol as string) || 'BTCUSDT').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const baseAsset = symbol.replace('USDT', '').replace(/[^A-Z0-9]/g, '');
+
+  try {
+    const allNews = await fetchAllLiveCryptoNews();
+
+    // 1. Separate coin-specific articles and general macro market articles using entity resolution
+    const coinSpecific: CryptoNewsItem[] = [];
+    const macroNews: CryptoNewsItem[] = [];
+
+    for (const item of allNews) {
+      const isCoinMatch = isArticleMatchingCoin(item.title, item.description, baseAsset);
+      if (isCoinMatch) {
+        coinSpecific.push({ ...item, coin: baseAsset, isCoinSpecific: true, category: 'COIN_SPECIFIC' });
+      } else {
+        macroNews.push({ ...item, isCoinSpecific: false, category: 'MACRO_MARKET' });
+      }
+    }
+
+    // 2. Strict isolation: If no specific news exists for this coin, the score MUST be 0 (Neutral).
+    // A Bitcoin or macro rally must NEVER artificially inflate the fundamental score of an unrelated altcoin!
+    let overallImpactScore = 0;
+    let dominantSentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'CONFLICTING' = 'NEUTRAL';
+    let sentimentLabel = 'Neutre / متوازن';
+    let confidenceScore = 20;
+    let officialCount = 0;
+
+    if (coinSpecific.length > 0) {
+      let totalWeightedScore = 0;
+      let totalWeight = 0;
+
+      for (const art of coinSpecific) {
+        const weight = art.isOfficial ? 2.5 : 1.0;
+        totalWeightedScore += art.impactScore * weight;
+        totalWeight += weight;
+        if (art.isOfficial) officialCount++;
+      }
+
+      overallImpactScore = totalWeight > 0 ? Math.round(totalWeightedScore / totalWeight) : 0;
+
+      if (overallImpactScore >= 35) {
+        dominantSentiment = 'BULLISH';
+        sentimentLabel = 'Haussier Fort / إيجابي بزاف';
+      } else if (overallImpactScore >= 12) {
+        dominantSentiment = 'BULLISH';
+        sentimentLabel = 'Haussier Modéré / متفائل';
+      } else if (overallImpactScore <= -35) {
+        dominantSentiment = 'BEARISH';
+        sentimentLabel = 'Baissier Fort / سلبي بزاف';
+      } else if (overallImpactScore <= -12) {
+        dominantSentiment = 'BEARISH';
+        sentimentLabel = 'Baissier Modéré / حذر وسلبي';
+      } else {
+        dominantSentiment = 'NEUTRAL';
+        sentimentLabel = 'Neutre / متوازن';
+      }
+
+      confidenceScore = Math.min(
+        95,
+        Math.max(35, coinSpecific.length * 15 + officialCount * 20)
+      );
+    } else {
+      // 0 specific news found for this token
+      overallImpactScore = 0;
+      dominantSentiment = 'NEUTRAL';
+      sentimentLabel = 'Neutre / Aucune actualité spécifique (0/100)';
+      confidenceScore = 20; // Reflects purely technical regime
+    }
+
+    // 3. Assemble articles: Coin-specific first, followed by contextual macro market news
+    const selectedArticles: CryptoNewsItem[] = [
+      ...coinSpecific,
+      ...macroNews.slice(0, Math.max(3, 15 - coinSpecific.length)),
+    ];
+
+    // Enrich each article with structured Moroccan Darija explanations with truthfulness flag
+    const enrichedArticles: CryptoNewsItem[] = selectedArticles.map((art) => ({
+      ...art,
+      darijaExplanation: generateDarijaExplanation(
+        art.title,
+        art.description,
+        art.source,
+        baseAsset,
+        art.impactScore,
+        art.isConfirmed,
+        Boolean(art.isCoinSpecific)
+      ),
+    }));
+
+    // Synthesis in Moroccan Darija
+    let generalSummaryDarija = '';
+    if (coinSpecific.length === 0) {
+      generalSummaryDarija = `ما كاين حتى خبر خاص أو مؤكد كيهضر مباشرة على عملة ${baseAsset} في هاد اللحظة. الأخبار المعروضة لتحت هي أخبار عامة ديال السوق (Macro Crypto / Bitcoin). القرار الاستثماري كيعتمد 100% على التحليل التقني SMC ومراقبة حركة الشموع.`;
+    } else if (dominantSentiment === 'BULLISH') {
+      generalSummaryDarija = `الأخبار الحالية ديال سوق الكريبتو كتعطي معنويات إيجابية وتفاؤل خاص بخصوص ${baseAsset}. كاين تدفق ديال السيولة واهتمام ملحوظ، ولكن ديما رد البال من الشراء في القمة وماتنساش الـ Stop Loss.`;
+    } else if (dominantSentiment === 'BEARISH') {
+      generalSummaryDarija = `الأخبار الأخيرة فيها ضغوطات سلبية وتخوف (FUD) كيقدر يأثر مباشرة على عملة ${baseAsset}. المتداولين الكبار واخدين الحيطة، خاصك تكون حذر وما تدخلش بلا وقف خسارة محكم.`;
+    } else {
+      generalSummaryDarija = `الأخبار المباشرة لعملة ${baseAsset} متوازنة ومحايدة (Neutral). ما كاينش شي خبر صادم اللي يغير الاتجاه جذرياً، والتحليل التقني للشموع هو الفيصل الأول.`;
+    }
+
+    const summary: NewsIntelligenceSummary = {
+      symbol,
+      overallImpactScore,
+      confidenceScore,
+      dominantSentiment,
+      sentimentLabel,
+      totalArticlesAnalyzed: enrichedArticles.length,
+      coinSpecificArticlesCount: coinSpecific.length,
+      officialSourcesCount: officialCount,
+      lastUpdated: Date.now(),
+      generalSummaryDarija,
+      keyCatalysts: [
+        coinSpecific.length > 0
+          ? `${coinSpecific.length} actualité(s) spécifique(s) auditée(s) pour ${baseAsset}`
+          : `Aucun catalyseur spécifique pour ${baseAsset} : régime 100% technique`,
+        `${officialCount} annonce(s) officielle(s) Binance auditée(s)`,
+        `Indice de confiance fondamentale : ${confidenceScore}%`,
+      ],
+      mainRisks: [
+        'Volatilité accrue lors des annonces macroéconomiques ou régulations',
+        'Effet d’annonce potentiellement déjà intégré dans les prix (Priced in)',
+        'Risque de rumeurs non vérifiées sur les réseaux sociaux',
+      ],
+      combinedVerdict: 'NO_TRADE',
+      verdictRationale: 'En attente de couplage avec le setup technique.',
+      verdictRationaleDarija: 'في انتظار الدمج مع التحليل التقني SMC.',
+    };
+
+    return res.json({
+      success: true,
+      symbol,
+      baseAsset,
+      summary,
+      articles: enrichedArticles,
+      totalCount: enrichedArticles.length,
+      coinSpecificCount: coinSpecific.length,
+      lastUpdated: Date.now(),
+      isLiveFeed: true,
+    });
+  } catch (err: any) {
+    console.error(`[News API Error for ${symbol}]:`, err?.message);
+    return res.status(500).json({
+      error: `Erreur lors de la récupération des actualités pour ${symbol} : ${err?.message || 'Erreur réseau'}`,
+      symbol,
+      articles: [],
+      summary: null,
+    });
+  }
+});
+
+// API: In-depth Moroccan Darija explanation via Gemini (with resilient local fallback)
+app.post('/api/news/explain-darija', async (req, res) => {
+  const { symbol, articles, currentPrice } = req.body;
+  const baseAsset = ((symbol as string) || 'BTCUSDT').replace('USDT', '');
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    // Graceful fallback to deterministic local Darija generator
+    return res.json({
+      success: true,
+      fallbackUsed: true,
+      darijaSynthesis: `تحليل الأخبار بالدارجة المغربية لعملة ${baseAsset} : الأوضاع الحالية كتطلب مراقبة مستويات السيولة وشموع الـ 15 دقيقة و 1 ساعة. حافظ على رأس مالك وتجنب التداول وقت الأخبار العنيفة.`,
+    });
+  }
+
+  try {
+    const prompt = `أنت خبير ومحلل مالي محترف في الكريبتو والتداول (Trading / Smart Money Concept) وتتكلم بالدارجة المغربية الفصيحة والواضحة (Moroccan Darija).
+قدم للمتداولين المغاربة تحليلاً وشرحاً مبسطاً وعميقاً للأخبار الحالية ديال عملة ${baseAsset} (السعر الحالي: ${currentPrice || 'N/A'}$).
+
+عناوين الأخبار الأخيرة:
+${(articles || []).slice(0, 5).map((a: any, i: number) => `${i + 1}. [${a.source}] ${a.title}`).join('\n')}
+
+المطلوب منك بالدارجة المغربية:
+1. شنو واقع دابا في السوق لهاد العملة؟
+2. واش هاد الأخبار كتشجع على الشراء ولا خاص الحذر؟
+3. نصيحة للمتداول بالدارجة بخصوص حماية رأس المال.
+
+أجب بنص واضح وسلس بالدارجة المغربية (بدون تعقيد ولا فرنسية غير مفهومة).`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: prompt,
+      config: {
+        temperature: 0.3,
+      },
+    });
+
+    return res.json({
+      success: true,
+      darijaSynthesis: response.text || '',
+    });
+  } catch (err: any) {
+    return res.json({
+      success: true,
+      fallbackUsed: true,
+      darijaSynthesis: `ملخص الأخبار بالدارجة المغربية لـ ${baseAsset} : الأخبار الحالية كتطلب مراقبة مستويات الدعم والمقاومة، مع احترام صارم للـ Stop Loss لتفادي تقلبات السوق المفاجئة.`,
+    });
+  }
 });
 
 // API: Ticker 24h market data from official Binance public endpoints
