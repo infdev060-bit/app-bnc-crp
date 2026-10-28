@@ -920,19 +920,27 @@ ${(articles || []).slice(0, 5).map((a: any, i: number) => `${i + 1}. [${a.source
 
 أجب بنص واضح وسلس بالدارجة المغربية (بدون تعقيد ولا فرنسية غير مفهومة).`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        temperature: 0.3,
-      },
-    });
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Gemini API timeout / quota delay (6s)')), 6000)
+    );
+
+    const response = await Promise.race([
+      ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: prompt,
+        config: {
+          temperature: 0.3,
+        },
+      }),
+      timeoutPromise,
+    ]);
 
     return res.json({
       success: true,
       darijaSynthesis: response.text || '',
     });
   } catch (err: any) {
+    console.warn('[Gemini Darija Notice]:', err?.message);
     return res.json({
       success: true,
       fallbackUsed: true,
