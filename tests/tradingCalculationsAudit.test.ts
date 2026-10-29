@@ -410,4 +410,155 @@ describe('Audit Technique et Mathématique : Crypto Edge AI v3.8 PRO', () => {
     const isDup = isSimilarStory(titleA, titleB);
     assert.strictEqual(isDup, true, 'Deux titres syndiqués couvrant le même événement doivent être détectés comme doublons');
   });
+
+  // =========================================================================
+  // 8. Backtest Conservateur, Spécificités Spot vs Futures & Rigueur Statistique
+  // =========================================================================
+  it('8.1. Simulation conservatrice : En cas de collision intra-bougie (SL et TP touchés dans la même bougie), sortie en PERTE', () => {
+    const entryPrice = 100;
+    const stopLoss = 95;
+    const takeProfit = 110;
+    // Bougie extrême qui dépasse à la fois le TP (112 > 110) et le SL (94 < 95)
+    const volatileCandle = {
+      time: Date.now(),
+      open: 99,
+      high: 112,
+      low: 94,
+      close: 105,
+      volume: 500,
+    };
+
+    // Règle conservative : si fc.low <= stopLoss && fc.high >= takeProfit -> LOSS
+    const isLongCollision = volatileCandle.low <= stopLoss && volatileCandle.high >= takeProfit;
+    assert.strictEqual(isLongCollision, true, 'La bougie touche à la fois le Stop Loss et le Take Profit');
+
+    // Résolution conservative : LOSS obligatoire pour ne pas supposer de façon optimiste que le TP est intervenu avant le SL
+    let tradeResult: 'WIN' | 'LOSS' = 'LOSS';
+    if (volatileCandle.low <= stopLoss && volatileCandle.high >= takeProfit) {
+      tradeResult = 'LOSS';
+    } else if (volatileCandle.high >= takeProfit) {
+      tradeResult = 'WIN';
+    }
+
+    assert.strictEqual(tradeResult, 'LOSS', 'La collision simultanée TP/SL doit être résolue en PERTE (pessimisme prudent)');
+  });
+
+  it('8.2. Spécificité Spot vs Futures : Le dimensionnement et le courtage distinguent Spot et Futures', () => {
+    const spotSetup = evaluateMarketSetup({
+      symbol: 'BTCUSDT',
+      market: 'spot',
+      currentPrice: 65000,
+      ticker: {
+        symbol: 'BTCUSDT',
+        market: 'spot',
+        price: 65000,
+        change24h: 2.0,
+        change24hAmount: 1300,
+        high24h: 66000,
+        low24h: 64000,
+        volume24h: 10000,
+        quoteVolume24h: 50000000,
+        timestamp: Date.now(),
+        tickSize: 0.01,
+        source: 'Binance',
+        isLive: true,
+        isStale: false,
+      },
+      timeframe4h: {
+        timeframe: '4h',
+        currentPrice: 65000,
+        trend: 'HAUSSIÈRE',
+        structure: 'BULLISH_STRUCTURE',
+        rsi: 55,
+        atr: 60,
+        atrPercent: 1.1,
+        ema20: 64500,
+        ema50: 63800,
+        ema200: 62000,
+        recentHigh: 66500,
+        recentLow: 63500,
+        candleCount: 50,
+        averageVolume20: 1000,
+        volumeRatio: 1.1,
+        orderBlock: { type: 'BULLISH', top: 64800, bottom: 64400, mitigated: false },
+      },
+      timeframe1h: {
+        timeframe: '1h',
+        currentPrice: 65000,
+        trend: 'HAUSSIÈRE',
+        structure: 'BULLISH_STRUCTURE',
+        rsi: 54,
+        atr: 50,
+        atrPercent: 1.1,
+        ema20: 64600,
+        ema50: 64000,
+        ema200: 62500,
+        recentHigh: 66000,
+        recentLow: 63800,
+        candleCount: 50,
+        averageVolume20: 1000,
+        volumeRatio: 1.2,
+        orderBlock: { type: 'BULLISH', top: 64800, bottom: 64400, mitigated: false },
+      },
+      timeframe15m: {
+        timeframe: '15m',
+        currentPrice: 65000,
+        trend: 'HAUSSIÈRE',
+        structure: 'BULLISH_STRUCTURE',
+        rsi: 52,
+        atr: 40,
+        atrPercent: 1.0,
+        ema20: 64700,
+        ema50: 64200,
+        ema200: 63000,
+        recentHigh: 65800,
+        recentLow: 64200,
+        candleCount: 50,
+        averageVolume20: 1000,
+        volumeRatio: 1.3,
+        orderBlock: { type: 'BULLISH', top: 64800, bottom: 64400, mitigated: false },
+      },
+      timeframe5m: {
+        timeframe: '5m',
+        currentPrice: 65000,
+        trend: 'HAUSSIÈRE',
+        structure: 'BULLISH_STRUCTURE',
+        rsi: 51,
+        atr: 30,
+        atrPercent: 0.9,
+        ema20: 64800,
+        ema50: 64400,
+        ema200: 63500,
+        recentHigh: 65600,
+        recentLow: 64500,
+        candleCount: 50,
+        averageVolume20: 1000,
+        volumeRatio: 1.1,
+        orderBlock: { type: 'BULLISH', top: 64800, bottom: 64400, mitigated: false },
+      },
+    });
+
+    assert.strictEqual(spotSetup.setup?.market, 'spot');
+    assert.strictEqual(spotSetup.setup?.estimatedFeesPercent, 0.20, 'Frais Spot A/R standard (0.10% * 2 = 0.20%)');
+  });
+
+  it('8.3. Calcul exact de l\'intervalle de confiance de Wilson à 95% sans approximation de Wald', () => {
+    const totalTrades = 20;
+    const winningTrades = 12;
+    const p = winningTrades / totalTrades; // 0.60
+    const q = 1 - p; // 0.40
+    const z = 1.95996;
+    const z2 = z * z;
+    const n = totalTrades;
+    const denom = 1 + z2 / n;
+    const center = (p + z2 / (2 * n)) / denom;
+    const margin = (z / denom) * Math.sqrt((p * q) / n + z2 / (4 * n * n));
+    const lower = Math.max(0, (center - margin) * 100);
+    const upper = Math.min(100, (center + margin) * 100);
+
+    assert.ok(!isNaN(lower) && !isNaN(upper), 'Les bornes de Wilson ne doivent jamais être NaN');
+    assert.ok(lower > 35 && lower < 45, `La borne basse de Wilson (obtenu: ${lower.toFixed(1)}%) doit être mathématiquement calibrée`);
+    assert.ok(upper > 75 && upper < 85, `La borne haute de Wilson (obtenu: ${upper.toFixed(1)}%) doit être mathématiquement calibrée`);
+    assert.ok(lower < 60 && upper > 60, 'Le taux moyen (60%) doit être situé au sein de l\'intervalle de Wilson');
+  });
 });

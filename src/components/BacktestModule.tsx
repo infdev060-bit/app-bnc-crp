@@ -11,6 +11,7 @@ import {
   RotateCcw,
   CheckCircle2,
   XCircle,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface BacktestModuleProps {
@@ -381,6 +382,16 @@ export const BacktestModule: React.FC<BacktestModuleProps> = ({ candles, symbol 
           />
         </div>
       </div>
+
+      {/* Statistical Sample Size Limitation Warning */}
+      {(candles.length < 500 || summary.totalTrades < 30) && (
+        <div className="p-3 bg-amber-950/30 border border-amber-800/60 rounded-xl flex items-start gap-2.5 text-xs text-amber-300">
+          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+          <div>
+            <strong>Limite Statistique de l'Échantillon ({summary.totalTrades} trade{summary.totalTrades > 1 ? 's' : ''} sur {candles.length} bougies) :</strong> Un échantillon de 100 à 500 bougies est insuffisant pour garantir la robustesse statistique à long terme (Loi des Grands Nombres nécessitant un minimum de 30 à 100 trades fermés). L'intervalle de confiance Wilson CI 95% reflète cette incertitude.
+          </div>
+        </div>
+      )}
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3 text-xs">

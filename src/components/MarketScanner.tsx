@@ -28,6 +28,7 @@ import {
   BarChart2,
   Percent,
   Check,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface MarketScannerProps {
@@ -941,6 +942,16 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
                             </span>
                           )}
                         </div>
+
+                        {/* Spot SHORT Margin Notice */}
+                        {isShort && item.market === 'spot' && (
+                          <div className="p-2.5 bg-amber-950/40 border border-amber-800/80 rounded-lg flex items-start gap-2.5 text-xs text-amber-200">
+                            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                            <div>
+                              <strong className="text-amber-300">Spécificité Spot :</strong> Cette opportunité SHORT nécessite un compte Margin avec emprunt d'actifs ou un basculement vers Binance USDⓈ-M Futures (le compte Spot au comptant ordinaire ne permet pas la vente à découvert directe).
+                            </div>
+                          </div>
+                        )}
                       </div>
                     ) : (
                       /* Disqualification Reasons Banner when NO TRADE or Incomplete */
