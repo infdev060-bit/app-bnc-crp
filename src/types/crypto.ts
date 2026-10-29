@@ -221,6 +221,20 @@ export interface BacktestSummary {
   totalFeesPaidPercent: number;
   equityCurve: Array<{ tradeIndex: number; equity: number }>;
   regimeBreakdown: Record<string, { trades: number; winRate: number; pnl: number }>;
+  expectancyPercent?: number;
+  winRateConfidenceInterval?: string;
+  benchmarkReturnPercent?: number;
+  trainTestSplit?: {
+    trainTrades: number;
+    trainWinRate: number;
+    testTrades: number;
+    testWinRate: number;
+  };
+  dataIntegrity?: {
+    duplicateTimestamps: number;
+    detectedGaps: number;
+    candleCount: number;
+  };
 }
 
 export interface RiskCalculation {
@@ -231,6 +245,8 @@ export interface RiskCalculation {
   market: MarketType;
   leverage: number;
   feeRatePercent: number;
+  slippagePercent?: number;
+  fundingRatePercent?: number;
   monetaryRisk: number;
   stopLossDistancePercent: number;
   positionSizeCrypto: number;
@@ -238,6 +254,7 @@ export interface RiskCalculation {
   marginRequiredUsd: number;
   estLiquidationPrice: number | null;
   estTotalFeesUsd: number;
+  estTotalFrictionUsd?: number;
 }
 
 export interface SavedAnalysis {

@@ -6,7 +6,8 @@ import { CryptoNewsItem, NewsIntelligenceSummary, TradeSetup } from '../types/cr
 const BULLISH_KEYWORDS = [
   'etf', 'approval', 'approved', 'partnership', 'record high', 'all-time high', 'ath', 'breakout',
   'bullish', 'surge', 'rally', 'adoption', 'launch', 'listing', 'adds', 'upgrade', 'mainnet',
-  'institutional', 'inflow', 'holding', 'reserves', 'integration', 'collateral', 'staking', 'milestone'
+  'institutional', 'inflow', 'holding', 'reserves', 'integration', 'collateral', 'staking', 'milestone',
+  'jump', 'jumps', 'climbs', 'skyrockets'
 ];
 
 const BEARISH_KEYWORDS = [
@@ -129,6 +130,7 @@ const PROJECT_NAMES_MAP: Record<string, string[]> = {
   APT: ['aptos', 'aptos labs'],
   PEPE: ['pepe coin', 'pepe memecoin', '$pepe'],
   CHIP: ['chip token', '$chip', '#chip', 'chipusdt', 'chip/usdt'],
+  ZEC: ['zcash', 'electric coin company', 'zec', '$zec', '#zec', 'zecusdt', 'zec/usdt'],
 };
 
 /**
@@ -339,6 +341,17 @@ export function combineTechnicalAndNewsVerdict(params: {
       combinedVerdict: 'NO_TRADE',
       verdictRationale: 'Données de marché obsolètes ou déconnectées. Prise de position strictement interdite pour protéger le capital.',
       verdictRationaleDarija: 'البيانات ديال السوق قديمة أو مقطوعة. ممنوع الدخول في أي صفقة حتى يرجع الاتصال المباشر باش تحمي راس مالك.',
+      confidenceScore: 0,
+    };
+  }
+
+  // Check if setup data timestamp is expired (> 90 seconds)
+  const isSetupExpired = setup && setup.dataTimestamp && (Date.now() - setup.dataTimestamp > 90000);
+  if (isSetupExpired) {
+    return {
+      combinedVerdict: 'NO_TRADE',
+      verdictRationale: 'Configuration de trading expirée (horodatage > 90s). Recalcul impératif sur les cotations fraîches.',
+      verdictRationaleDarija: 'فرصة التداول انتهت صلاحيتها (فاتت 90 ثانية). خاص إعادة الحساب على الأسعار الحية الحالية.',
       confidenceScore: 0,
     };
   }

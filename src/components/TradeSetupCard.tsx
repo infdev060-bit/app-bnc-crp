@@ -205,6 +205,9 @@ Score de Qualité: ${qualityScore.total}/100 (${qualityScore.ratingLabel})
                 <div className="text-lg font-mono font-bold text-rose-300 mt-1">
                   {formatCryptoPrice(setup.stopLoss, setup.tickSize)}$
                 </div>
+                <div className="text-[10px] text-rose-400/90 font-mono mt-0.5">
+                  Risque : -{formatCryptoPrice(setup.unitRisk ?? (outcome === 'LONG' ? setup.entryPrice - setup.stopLoss : setup.stopLoss - setup.entryPrice), setup.tickSize)}$ / unité
+                </div>
                 <div className="text-[10px] text-slate-400 mt-0.5 truncate" title={setup.invalidationCondition}>
                   Invalidation structurelle
                 </div>
@@ -235,6 +238,9 @@ Score de Qualité: ${qualityScore.total}/100 (${qualityScore.ratingLabel})
                     </span>
                   )}
                 </div>
+                <div className="text-[10px] text-emerald-400/90 font-mono mt-0.5">
+                  Gain brut : +{formatCryptoPrice(setup.unitGainTP1 ?? Math.abs(setup.takeProfit1 - setup.entryPrice), setup.tickSize)}$ / unité
+                </div>
               </div>
 
               {/* TP2 */}
@@ -261,6 +267,9 @@ Score de Qualité: ${qualityScore.total}/100 (${qualityScore.ratingLabel})
                       Net: {setup.netRiskRewardRatioTP2}:1
                     </span>
                   )}
+                </div>
+                <div className="text-[10px] text-emerald-400/90 font-mono mt-0.5">
+                  Gain brut : +{formatCryptoPrice(setup.unitGainTP2 ?? Math.abs(setup.takeProfit2 - setup.entryPrice), setup.tickSize)}$ / unité
                 </div>
               </div>
 
@@ -289,6 +298,9 @@ Score de Qualité: ${qualityScore.total}/100 (${qualityScore.ratingLabel})
                         Net: {setup.netRiskRewardRatioTP3}:1
                       </span>
                     )}
+                  </div>
+                  <div className="text-[10px] text-emerald-400/90 font-mono mt-0.5">
+                    Gain brut : +{formatCryptoPrice(setup.unitGainTP3 ?? Math.abs(setup.takeProfit3 - setup.entryPrice), setup.tickSize)}$ / unité
                   </div>
                 </div>
               )}
@@ -388,6 +400,13 @@ Score de Qualité: ${qualityScore.total}/100 (${qualityScore.ratingLabel})
                 {qualityScore.breakdown.volatilityScore}/10
               </div>
             </div>
+          </div>
+
+          <div className="pt-2 border-t border-slate-800/80 text-[11px] text-slate-400 leading-relaxed flex items-start gap-2">
+            <Info className="w-3.5 h-3.5 text-blue-400 shrink-0 mt-0.5" />
+            <span>
+              <strong className="text-slate-300">Règle de transparence quantitative :</strong> Le Score de Qualité ({qualityScore.total}/100) mesure la complétude des confluences techniques SMC/MTF et la conformité au protocole de gestion du risque. Il ne constitue <strong>en aucun cas</strong> une probabilité statistique de gain (ex: 95/100 &ne; 95% de chances de gain) ni une promesse de win-rate. Aucun trade n'est garanti.
+            </span>
           </div>
         </div>
 

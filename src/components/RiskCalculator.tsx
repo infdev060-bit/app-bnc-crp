@@ -20,7 +20,10 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
   const [stopLoss, setStopLoss] = useState<number>(currentPrice ? currentPrice * 0.98 : 63700);
   const [market, setMarket] = useState<MarketType>('futures');
   const [leverage, setLeverage] = useState<number>(5);
-  const [feeRatePercent, setFeeRatePercent] = useState<number>(0.04); // 0.04% taker
+  const [feeRole, setFeeRole] = useState<'taker' | 'maker'>('taker');
+  const [feeRatePercent, setFeeRatePercent] = useState<number>(0.04); // 0.04% taker futures
+  const [slippagePercent, setSlippagePercent] = useState<number>(0.02); // 0.02% estimated slippage
+  const [fundingRatePercent, setFundingRatePercent] = useState<number>(0.01); // 0.01% / 8h estimated perpetual funding
 
   // Sync when initialSetup changes
   useEffect(() => {
@@ -29,11 +32,36 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
       setStopLoss(initialSetup.stopLoss);
       setMarket(initialSetup.market);
       setRiskPercent(initialSetup.suggestedRiskPercent || 1.0);
+      if (initialSetup.market === 'spot') {
+        setFeeRatePercent(0.10);
+      } else {
+        setFeeRatePercent(feeRole === 'taker' ? 0.04 : 0.02);
+      }
     } else if (currentPrice > 0 && (!entryPrice || entryPrice === 0)) {
       setEntryPrice(currentPrice);
       setStopLoss(currentPrice * 0.98);
     }
   }, [initialSetup, currentPrice]);
+
+  // Handle market switch
+  const handleMarketChange = (newMarket: MarketType) => {
+    setMarket(newMarket);
+    if (newMarket === 'spot') {
+      setFeeRatePercent(0.10);
+    } else {
+      setFeeRatePercent(feeRole === 'taker' ? 0.04 : 0.02);
+    }
+  };
+
+  // Handle fee role switch
+  const handleFeeRoleChange = (newRole: 'taker' | 'maker') => {
+    setFeeRole(newRole);
+    if (market === 'futures') {
+      setFeeRatePercent(newRole === 'taker' ? 0.04 : 0.02);
+    } else {
+      setFeeRatePercent(0.10);
+    }
+  };
 
   // Compute Risk Metrics
   const calculation: RiskCalculation = React.useMemo(() => {
@@ -62,8 +90,14 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
       }
     }
 
-    // Fees: Entry + Exit fee estimation
+    // Fees: Entry + Exit fee estimation (Round-trip)
     const estTotalFeesUsd = positionSizeUsd * (feeRatePercent / 100) * 2;
+    // Slippage: Entry + Exit round-trip
+    const estTotalSlippageUsd = positionSizeUsd * (slippagePercent / 100) * 2;
+    // Funding: holding period friction (Futures perpetual)
+    const estFundingUsd = market === 'futures' ? positionSizeUsd * (fundingRatePercent / 100) : 0;
+    // Total friction
+    const estTotalFrictionUsd = estTotalFeesUsd + estTotalSlippageUsd + estFundingUsd;
 
     return {
       accountBalance,
@@ -73,6 +107,8 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
       market,
       leverage,
       feeRatePercent,
+      slippagePercent,
+      fundingRatePercent,
       monetaryRisk,
       stopLossDistancePercent,
       positionSizeCrypto,
@@ -80,8 +116,9 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
       marginRequiredUsd,
       estLiquidationPrice,
       estTotalFeesUsd,
+      estTotalFrictionUsd,
     };
-  }, [accountBalance, riskPercent, entryPrice, stopLoss, market, leverage, feeRatePercent]);
+  }, [accountBalance, riskPercent, entryPrice, stopLoss, market, leverage, feeRatePercent, slippagePercent, fundingRatePercent]);
 
   const isLiquidationBeforeStopLoss =
     calculation.estLiquidationPrice !== null &&
@@ -107,7 +144,7 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
 
         <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
           <button
-            onClick={() => setMarket('spot')}
+            onClick={() => handleMarketChange('spot')}
             className={`px-3 py-1 rounded font-medium transition-colors ${
               market === 'spot' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
             }`}
@@ -115,7 +152,7 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
             Spot (Sans levier)
           </button>
           <button
-            onClick={() => setMarket('futures')}
+            onClick={() => handleMarketChange('futures')}
             className={`px-3 py-1 rounded font-medium transition-colors ${
               market === 'futures' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
             }`}
@@ -201,46 +238,110 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
         </div>
       </div>
 
-      {/* Futures specific settings */}
-      {market === 'futures' && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1 border-t border-slate-800/80 text-xs">
+      {/* Execution Cost Settings (Maker/Taker, Slippage, Funding) */}
+      <div className="p-3.5 bg-slate-950/60 border border-slate-800 rounded-xl space-y-3 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/60 pb-2">
+          <span className="font-semibold text-slate-200 flex items-center gap-1.5">
+            Paramètres d'Exécution & Frottements Financiers
+          </span>
+          <span className="text-[10px] text-amber-400 font-medium">
+            * Estimation indicative non garantie
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div>
             <div className="flex items-center justify-between mb-1">
-              <label className="text-slate-300 font-medium">
-                Effet de Levier ({leverage}x)
-              </label>
-              <span className="text-[11px] text-slate-400">
-                Marge requise : {calculation.marginRequiredUsd.toFixed(2)}$
-              </span>
+              <label className="text-slate-300 font-medium">Frais Courtage ({feeRole})</label>
+              <div className="flex gap-1 text-[10px]">
+                <button
+                  type="button"
+                  onClick={() => handleFeeRoleChange('taker')}
+                  className={`px-1.5 py-0.5 rounded border ${
+                    feeRole === 'taker' ? 'bg-blue-600 text-white border-blue-500' : 'border-slate-800 text-slate-400'
+                  }`}
+                >
+                  Taker
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleFeeRoleChange('maker')}
+                  className={`px-1.5 py-0.5 rounded border ${
+                    feeRole === 'maker' ? 'bg-blue-600 text-white border-blue-500' : 'border-slate-800 text-slate-400'
+                  }`}
+                >
+                  Maker
+                </button>
+              </div>
             </div>
-            <input
-              type="range"
-              min="1"
-              max="50"
-              value={leverage}
-              onChange={(e) => setLeverage(parseInt(e.target.value, 10))}
-              className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
-            />
-            <div className="flex justify-between text-[10px] text-slate-500 mt-1 font-mono">
-              <span>1x</span>
-              <span>5x</span>
-              <span>10x</span>
-              <span>20x</span>
-              <span>50x</span>
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-slate-300 font-medium mb-1">
-              Frais Estimés (Taker / Maker %)
-            </label>
             <input
               type="number"
               step="0.01"
               value={feeRatePercent}
-              onChange={(e) => setFeeRatePercent(parseFloat(e.target.value) || 0.04)}
+              onChange={(e) => setFeeRatePercent(parseFloat(e.target.value) || 0)}
               className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-slate-100 font-mono text-xs focus:border-blue-500 focus:outline-hidden"
             />
+          </div>
+
+          <div>
+            <label className="block text-slate-300 font-medium mb-1">
+              Slippage Estimé (%)
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              value={slippagePercent}
+              onChange={(e) => setSlippagePercent(Math.max(0, parseFloat(e.target.value) || 0))}
+              className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-slate-100 font-mono text-xs focus:border-blue-500 focus:outline-hidden"
+            />
+          </div>
+
+          {market === 'futures' ? (
+            <div>
+              <label className="block text-slate-300 font-medium mb-1">
+                Financement Perpétuel (% / 8h)
+              </label>
+              <input
+                type="number"
+                step="0.005"
+                value={fundingRatePercent}
+                onChange={(e) => setFundingRatePercent(parseFloat(e.target.value) || 0)}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-slate-100 font-mono text-xs focus:border-blue-500 focus:outline-hidden"
+              />
+            </div>
+          ) : (
+            <div className="text-slate-500 flex items-center pt-5">
+              <span>Pas de frais de financement sur Spot</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Futures leverage slider */}
+      {market === 'futures' && (
+        <div className="pt-1 text-xs">
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-slate-300 font-medium">
+              Effet de Levier ({leverage}x)
+            </label>
+            <span className="text-[11px] text-slate-400">
+              Marge requise : {calculation.marginRequiredUsd.toFixed(2)}$
+            </span>
+          </div>
+          <input
+            type="range"
+            min="1"
+            max="50"
+            value={leverage}
+            onChange={(e) => setLeverage(parseInt(e.target.value, 10))}
+            className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+          />
+          <div className="flex justify-between text-[10px] text-slate-500 mt-1 font-mono">
+            <span>1x</span>
+            <span>5x</span>
+            <span>10x</span>
+            <span>20x</span>
+            <span>50x</span>
           </div>
         </div>
       )}
@@ -294,17 +395,15 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
 
         <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl">
           <span className="text-slate-400 text-[11px] block">
-            {market === 'futures' ? 'Prix de Liquidation Estimé' : 'Frais de Courtage Estimés'}
+            {market === 'futures' ? 'Prix Liq. & Frottements' : 'Frais + Slippage Estimés'}
           </span>
           <div className="text-base font-mono font-bold text-amber-400 mt-0.5">
-            {market === 'futures'
-              ? calculation.estLiquidationPrice !== null
-                ? `${formatCryptoPrice(calculation.estLiquidationPrice, initialSetup?.tickSize)}$`
-                : 'N/A'
-              : `${calculation.estTotalFeesUsd.toFixed(2)}$`}
+            {market === 'futures' && calculation.estLiquidationPrice !== null
+              ? `${formatCryptoPrice(calculation.estLiquidationPrice, initialSetup?.tickSize)}$`
+              : `~${(calculation.estTotalFrictionUsd || calculation.estTotalFeesUsd).toFixed(2)}$`}
           </div>
           <span className="text-[10px] text-slate-500">
-            {market === 'futures' ? `Frais: ~${calculation.estTotalFeesUsd.toFixed(2)}$` : 'Aller / Retour'}
+            Frottements A/R: ~{(calculation.estTotalFrictionUsd || calculation.estTotalFeesUsd).toFixed(2)}$
           </span>
         </div>
       </div>
@@ -318,7 +417,7 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
               Projections Financières sur Objectifs (TP1, TP2, TP3)
             </span>
             <span className="text-[11px] text-slate-400">
-              Gains nets calculés après déduction des frais de courtage estimés
+              Gains nets calculés après déduction des frais, slippage et funding estimés
             </span>
           </div>
 
@@ -332,9 +431,11 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
                 </div>
                 {(() => {
                   const grossGain = calculation.positionSizeCrypto * Math.abs(initialSetup.takeProfit1 - entryPrice);
-                  const exitFee = (calculation.positionSizeCrypto * initialSetup.takeProfit1) * (feeRatePercent / 100);
-                  const entryFee = calculation.positionSizeUsd * (feeRatePercent / 100);
-                  const netGain = Math.max(0, grossGain - (entryFee + exitFee));
+                  const entryFriction = calculation.positionSizeUsd * ((feeRatePercent + slippagePercent) / 100);
+                  const exitFriction = (calculation.positionSizeCrypto * initialSetup.takeProfit1) * ((feeRatePercent + slippagePercent) / 100);
+                  const fundingCost = market === 'futures' ? calculation.positionSizeUsd * (fundingRatePercent / 100) : 0;
+                  const totalFriction = entryFriction + exitFriction + fundingCost;
+                  const netGain = Math.max(0, grossGain - totalFriction);
                   const netRR = calculation.monetaryRisk > 0 ? (netGain / calculation.monetaryRisk) : 0;
                   return (
                     <div className="space-y-1">
@@ -360,9 +461,11 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
                 </div>
                 {(() => {
                   const grossGain = calculation.positionSizeCrypto * Math.abs(initialSetup.takeProfit2 - entryPrice);
-                  const exitFee = (calculation.positionSizeCrypto * initialSetup.takeProfit2) * (feeRatePercent / 100);
-                  const entryFee = calculation.positionSizeUsd * (feeRatePercent / 100);
-                  const netGain = Math.max(0, grossGain - (entryFee + exitFee));
+                  const entryFriction = calculation.positionSizeUsd * ((feeRatePercent + slippagePercent) / 100);
+                  const exitFriction = (calculation.positionSizeCrypto * initialSetup.takeProfit2) * ((feeRatePercent + slippagePercent) / 100);
+                  const fundingCost = market === 'futures' ? calculation.positionSizeUsd * (fundingRatePercent / 100) : 0;
+                  const totalFriction = entryFriction + exitFriction + fundingCost;
+                  const netGain = Math.max(0, grossGain - totalFriction);
                   const netRR = calculation.monetaryRisk > 0 ? (netGain / calculation.monetaryRisk) : 0;
                   return (
                     <div className="space-y-1">
@@ -388,9 +491,11 @@ export const RiskCalculator: React.FC<RiskCalculatorProps> = ({
                 </div>
                 {(() => {
                   const grossGain = calculation.positionSizeCrypto * Math.abs(initialSetup.takeProfit3 - entryPrice);
-                  const exitFee = (calculation.positionSizeCrypto * initialSetup.takeProfit3) * (feeRatePercent / 100);
-                  const entryFee = calculation.positionSizeUsd * (feeRatePercent / 100);
-                  const netGain = Math.max(0, grossGain - (entryFee + exitFee));
+                  const entryFriction = calculation.positionSizeUsd * ((feeRatePercent + slippagePercent) / 100);
+                  const exitFriction = (calculation.positionSizeCrypto * initialSetup.takeProfit3) * ((feeRatePercent + slippagePercent) / 100);
+                  const fundingCost = market === 'futures' ? calculation.positionSizeUsd * (fundingRatePercent / 100) : 0;
+                  const totalFriction = entryFriction + exitFriction + fundingCost;
+                  const netGain = Math.max(0, grossGain - totalFriction);
                   const netRR = calculation.monetaryRisk > 0 ? (netGain / calculation.monetaryRisk) : 0;
                   return (
                     <div className="space-y-1">

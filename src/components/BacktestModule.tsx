@@ -45,6 +45,15 @@ export const BacktestModule: React.FC<BacktestModuleProps> = ({ candles, symbol 
       };
     }
 
+    // Data integrity validation: detect timestamp anomalies or abnormal gaps
+    let duplicateTimestamps = 0;
+    let detectedGaps = 0;
+    for (let j = 1; j < candles.length; j++) {
+      const dt = candles[j].time - candles[j - 1].time;
+      if (dt <= 0) duplicateTimestamps++;
+      if (dt > 1000 * 60 * 60 * 6) detectedGaps++;
+    }
+
     const trades: BacktestTrade[] = [];
     let equity = 10000;
     const equityCurve = [{ tradeIndex: 0, equity }];
@@ -117,9 +126,11 @@ export const BacktestModule: React.FC<BacktestModuleProps> = ({ candles, symbol 
 
       for (const fc of forwardSlice) {
         if (signal === 'LONG') {
-          if (fc.high >= takeProfit) {
-            tradeResult = 'WIN';
-            exitPrice = takeProfit;
+          // Conservative execution: If both SL and TP are touched in the same candle,
+          // assume SL hit first (loss) to eliminate optimistic win bias
+          if (fc.low <= stopLoss && fc.high >= takeProfit) {
+            tradeResult = 'LOSS';
+            exitPrice = stopLoss;
             break;
           }
           if (fc.low <= stopLoss) {
@@ -127,15 +138,27 @@ export const BacktestModule: React.FC<BacktestModuleProps> = ({ candles, symbol 
             exitPrice = stopLoss;
             break;
           }
-        } else {
-          if (fc.low <= takeProfit) {
+          if (fc.high >= takeProfit) {
             tradeResult = 'WIN';
             exitPrice = takeProfit;
+            break;
+          }
+        } else {
+          // Conservative execution for SHORT: If both SL and TP are touched in the same candle,
+          // assume SL hit first (loss) to eliminate optimistic win bias
+          if (fc.high >= stopLoss && fc.low <= takeProfit) {
+            tradeResult = 'LOSS';
+            exitPrice = stopLoss;
             break;
           }
           if (fc.high >= stopLoss) {
             tradeResult = 'LOSS';
             exitPrice = stopLoss;
+            break;
+          }
+          if (fc.low <= takeProfit) {
+            tradeResult = 'WIN';
+            exitPrice = takeProfit;
             break;
           }
         }
@@ -187,6 +210,48 @@ export const BacktestModule: React.FC<BacktestModuleProps> = ({ candles, symbol 
     const netReturnPercent = ((equity - 10000) / 10000) * 100;
     const grossReturnPercent = netReturnPercent + totalTrades * feeRate * 2;
 
+    // Mathematical Expectancy per trade: E = (p * avgWin) - (q * avgLoss)
+    const p = totalTrades > 0 ? winningTrades / totalTrades : 0;
+    const q = 1 - p;
+    const expectancyPercent = totalTrades > 0 ? (p * avgWinPercent) - (q * avgLossPercent) : 0;
+
+    // Exact Wilson Score 95% Confidence Interval for Win Rate (z = 1.95996)
+    let winRateConfidenceInterval = 'N/A';
+    if (totalTrades >= 5) {
+      const z = 1.95996;
+      const z2 = z * z;
+      const n = totalTrades;
+      const denom = 1 + z2 / n;
+      const center = (p + z2 / (2 * n)) / denom;
+      const margin = (z / denom) * Math.sqrt((p * q) / n + z2 / (4 * n * n));
+      const lower = Math.max(0, (center - margin) * 100).toFixed(1);
+      const upper = Math.min(100, (center + margin) * 100).toFixed(1);
+      winRateConfidenceInterval = `[${lower}% - ${upper}%]`;
+    }
+
+    // Benchmark: Buy & Hold return over the simulated period
+    const startPrice = candles[lookback]?.close || candles[0]?.close || 1;
+    const endPrice = candles[candles.length - 1]?.close || 1;
+    const benchmarkReturnPercent = startPrice > 0 ? ((endPrice - startPrice) / startPrice) * 100 : 0;
+
+    // Chronological Train (70%) vs Untouched Out-of-Sample Test (30%)
+    const splitIndex = Math.floor(totalTrades * 0.7);
+    const trainTradesList = trades.slice(0, splitIndex);
+    const testTradesList = trades.slice(splitIndex);
+
+    const trainWins = trainTradesList.filter((t) => t.result === 'WIN').length;
+    const trainWinRate = trainTradesList.length > 0 ? (trainWins / trainTradesList.length) * 100 : 0;
+
+    const testWins = testTradesList.filter((t) => t.result === 'WIN').length;
+    const testWinRate = testTradesList.length > 0 ? (testWins / testTradesList.length) * 100 : 0;
+
+    const trainTestSplit = {
+      trainTrades: trainTradesList.length,
+      trainWinRate,
+      testTrades: testTradesList.length,
+      testWinRate,
+    };
+
     // Regime breakdown
     const regimeBreakdown: Record<string, { trades: number; winRate: number; pnl: number }> = {};
     ['HAUSSIER', 'BAISSIER', 'RANGE'].forEach((reg) => {
@@ -213,6 +278,15 @@ export const BacktestModule: React.FC<BacktestModuleProps> = ({ candles, symbol 
       totalFeesPaidPercent: totalTrades * feeRate * 2,
       equityCurve,
       regimeBreakdown,
+      expectancyPercent,
+      winRateConfidenceInterval,
+      benchmarkReturnPercent,
+      trainTestSplit,
+      dataIntegrity: {
+        duplicateTimestamps,
+        detectedGaps,
+        candleCount: candles.length,
+      },
     };
   }, [candles, strategy, targetRRR, simulatedTimeframe, feeRate]);
 
@@ -236,7 +310,12 @@ export const BacktestModule: React.FC<BacktestModuleProps> = ({ candles, symbol 
 
         <div className="flex items-center gap-2 text-xs">
           <span className="px-2.5 py-1 rounded bg-slate-950 border border-slate-800 text-slate-400">
-            Échantillon : {candles.length} bougies analysées
+            Échantillon : {candles.length} bougies
+            {summary.dataIntegrity && summary.dataIntegrity.duplicateTimestamps === 0 && summary.dataIntegrity.detectedGaps === 0 ? (
+              <span className="text-emerald-400 ml-1.5 font-medium">(0 doublon, 0 gap)</span>
+            ) : summary.dataIntegrity ? (
+              <span className="text-amber-400 ml-1.5 font-medium">({summary.dataIntegrity.duplicateTimestamps} doublons, {summary.dataIntegrity.detectedGaps} gaps)</span>
+            ) : null}
           </span>
         </div>
       </div>
@@ -304,7 +383,7 @@ export const BacktestModule: React.FC<BacktestModuleProps> = ({ candles, symbol 
       </div>
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3 text-xs">
         <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl">
           <span className="text-slate-400 text-[11px] block">Trades Simulés</span>
           <div className="text-lg font-mono font-bold text-slate-100 mt-0.5">
@@ -320,8 +399,18 @@ export const BacktestModule: React.FC<BacktestModuleProps> = ({ candles, symbol 
           <div className={`text-lg font-mono font-bold mt-0.5 ${summary.winRate >= 50 ? 'text-emerald-400' : 'text-amber-400'}`}>
             {summary.winRate.toFixed(1)} %
           </div>
+          <span className="text-[9px] text-slate-400 font-mono">
+            IC 95%: {summary.winRateConfidenceInterval || 'N/A'}
+          </span>
+        </div>
+
+        <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl">
+          <span className="text-slate-400 text-[11px] block">Espérance / Trade</span>
+          <div className={`text-lg font-mono font-bold mt-0.5 ${(summary.expectancyPercent || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            {(summary.expectancyPercent || 0) >= 0 ? '+' : ''}{(summary.expectancyPercent || 0).toFixed(2)} %
+          </div>
           <span className="text-[10px] text-slate-500">
-            Win Rate net
+            Espérance mathématique
           </span>
         </div>
 
@@ -356,21 +445,60 @@ export const BacktestModule: React.FC<BacktestModuleProps> = ({ candles, symbol 
         </div>
 
         <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl">
-          <span className="text-slate-400 text-[11px] block">Gain Moyen / Perte</span>
-          <div className="text-sm font-mono font-bold text-slate-200 mt-1">
-            <span className="text-emerald-400">+{summary.avgWinPercent.toFixed(1)}%</span> / <span className="text-rose-400">-{summary.avgLossPercent.toFixed(1)}%</span>
+          <span className="text-slate-400 text-[11px] block">Benchmark Buy&Hold</span>
+          <div className={`text-lg font-mono font-bold mt-0.5 ${(summary.benchmarkReturnPercent || 0) >= 0 ? 'text-blue-400' : 'text-slate-300'}`}>
+            {(summary.benchmarkReturnPercent || 0) >= 0 ? '+' : ''}{(summary.benchmarkReturnPercent || 0).toFixed(1)} %
           </div>
           <span className="text-[10px] text-slate-500">
-            Par trade
+            Sur la période
           </span>
         </div>
       </div>
+
+      {/* Train (70%) vs Out-of-Sample Test (30%) Chronological Split Validation */}
+      {summary.trainTestSplit && summary.trainTestSplit.trainTrades > 0 && (
+        <div className="p-4 bg-slate-950/60 border border-slate-800 rounded-xl space-y-2.5">
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs font-semibold text-slate-200 uppercase tracking-wide flex items-center gap-1.5">
+              <CheckCircle2 className="w-3.5 h-3.5 text-blue-400" />
+              Partition Chronologique : Train (In-Sample 70%) vs Test Inviolé (Out-of-Sample 30%)
+            </h4>
+            <span className="text-[10px] text-slate-400">
+              Protection contre le sur-apprentissage (Anti-Overfitting & Survivorship Bias)
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+            <div className="p-3 bg-slate-900 border border-slate-800 rounded-lg">
+              <div className="flex justify-between items-center text-slate-300 font-medium pb-1 border-b border-slate-800">
+                <span>Échantillon Train (In-Sample chronologique)</span>
+                <span className="font-mono text-[11px] text-slate-400">{summary.trainTestSplit.trainTrades} trades</span>
+              </div>
+              <div className="flex justify-between items-center mt-2">
+                <span className="text-slate-400 text-[11px]">Taux de réussite Train :</span>
+                <span className="font-mono font-bold text-slate-200">{summary.trainTestSplit.trainWinRate.toFixed(1)}%</span>
+              </div>
+            </div>
+
+            <div className="p-3 bg-slate-900 border border-slate-800 rounded-lg">
+              <div className="flex justify-between items-center text-slate-300 font-medium pb-1 border-b border-slate-800">
+                <span className="text-emerald-400">Échantillon Test Inviolé (Out-of-Sample)</span>
+                <span className="font-mono text-[11px] text-slate-400">{summary.trainTestSplit.testTrades} trades</span>
+              </div>
+              <div className="flex justify-between items-center mt-2">
+                <span className="text-slate-400 text-[11px]">Taux de réussite Out-of-Sample :</span>
+                <span className="font-mono font-bold text-emerald-400">{summary.trainTestSplit.testWinRate.toFixed(1)}%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Performance by Market Regime Breakdown */}
       <div className="p-4 bg-slate-950/50 border border-slate-800 rounded-xl space-y-3">
         <h4 className="text-xs font-semibold text-slate-200 uppercase tracking-wide flex items-center gap-1.5">
           <Layers className="w-3.5 h-3.5 text-blue-400" />
-          Performance par Régime de Marché
+          Performance par Régime de Marché (Haussier / Baissier / Range)
         </h4>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">

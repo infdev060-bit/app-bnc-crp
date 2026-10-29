@@ -314,22 +314,27 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
     const rawSL = Math.min(structuralLow, obBottom) - (atrValue * 0.25);
     const alignedSL = quantizePrice(rawSL, tickSize, 'floor');
 
+    const isPriceBelowStructure = Boolean(timeframe15m?.recentLow && alignedEntry < timeframe15m.recentLow);
     const rawRisk = alignedEntry - alignedSL;
     const rawRiskPct = alignedEntry > 0 ? (rawRisk / alignedEntry) * 100 : 0;
-    const isSlDistanceValid = alignedSL < alignedEntry && rawRiskPct >= 0.35 && rawRiskPct <= 6.0;
+    const isSlDistanceValid = !isPriceBelowStructure && alignedSL < alignedEntry && rawRiskPct >= 0.35 && rawRiskPct <= 6.0;
 
     checklist.push({
       id: 'check-8',
       label: 'Niveau d’invalidation logique (Stop Loss)',
       status: isSlDistanceValid ? 'PASSED' : 'FAILED',
-      comment: isSlDistanceValid
+      comment: isPriceBelowStructure
+        ? `Le prix actuel (${formatCryptoPrice(alignedEntry, tickSize)}) a déjà franchi le creux structurel (${formatCryptoPrice(timeframe15m?.recentLow, tickSize)}). Structure acheteuse invalidée.`
+        : isSlDistanceValid
         ? `SL sous creux structurel / OB à ${formatCryptoPrice(alignedSL, tickSize)} USDT (-${rawRiskPct.toFixed(2)}%). Distance saine.`
         : alignedSL >= alignedEntry
         ? `Erreur mathématique : le Stop Loss (${formatCryptoPrice(alignedSL, tickSize)}) ne peut être supérieur ou égal au prix d'entrée (${formatCryptoPrice(alignedEntry, tickSize)}).`
         : `Distance SL anormale (${rawRiskPct.toFixed(2)}%). Doit être comprise entre 0.35% et 6.0%.`,
     });
 
-    if (!isSlDistanceValid) {
+    if (isPriceBelowStructure) {
+      noTradeReasons.push(`Le prix d'entrée actuel est déjà sous le creux structurel 15M (${formatCryptoPrice(timeframe15m?.recentLow, tickSize)}). Setup acheteur caduc.`);
+    } else if (!isSlDistanceValid) {
       noTradeReasons.push(`Stop Loss (${formatCryptoPrice(alignedSL, tickSize)}) invalide ou distance de risque (${rawRiskPct.toFixed(2)}%) hors limites.`);
     }
 
@@ -392,6 +397,8 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
       );
     }
 
+    const priceDecimals = Math.max(2, getDecimalsFromTickSize(tickSize));
+
     if (isSlDistanceValid && hierarchyCheck.isValid && isGrossRrValid && isNetRrValid) {
       setup = {
         direction: 'LONG',
@@ -417,10 +424,10 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
         grossGainPercentTP3: parseFloat(rr3.grossGainPct.toFixed(2)),
         netGainPercentTP3: parseFloat(rr3.netGainPct.toFixed(2)),
         riskPercent: parseFloat(rawRiskPct.toFixed(2)),
-        unitRisk: parseFloat(Math.abs(alignedEntry - alignedSL).toFixed(tickSize < 0.1 ? 6 : 2)),
-        unitGainTP1: parseFloat(Math.abs(alignedTP1 - alignedEntry).toFixed(tickSize < 0.1 ? 6 : 2)),
-        unitGainTP2: parseFloat(Math.abs(alignedTP2 - alignedEntry).toFixed(tickSize < 0.1 ? 6 : 2)),
-        unitGainTP3: alignedTP3 ? parseFloat(Math.abs(alignedTP3 - alignedEntry).toFixed(tickSize < 0.1 ? 6 : 2)) : undefined,
+        unitRisk: parseFloat(Math.abs(alignedEntry - alignedSL).toFixed(priceDecimals)),
+        unitGainTP1: parseFloat(Math.abs(alignedTP1 - alignedEntry).toFixed(priceDecimals)),
+        unitGainTP2: parseFloat(Math.abs(alignedTP2 - alignedEntry).toFixed(priceDecimals)),
+        unitGainTP3: alignedTP3 ? parseFloat(Math.abs(alignedTP3 - alignedEntry).toFixed(priceDecimals)) : undefined,
         estimatedFeesPercent: market === 'futures' ? 0.08 : 0.20,
         estimatedSlippagePercent: 0.05,
         confirmedTimeframes: [
@@ -456,22 +463,27 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
     const rawSL = Math.max(structuralHigh, obTop) + (atrValue * 0.25);
     const alignedSL = quantizePrice(rawSL, tickSize, 'ceil');
 
+    const isPriceAboveStructure = Boolean(timeframe15m?.recentHigh && alignedEntry > timeframe15m.recentHigh);
     const rawRisk = alignedSL - alignedEntry;
     const rawRiskPct = alignedEntry > 0 ? (rawRisk / alignedEntry) * 100 : 0;
-    const isSlDistanceValid = alignedSL > alignedEntry && rawRiskPct >= 0.35 && rawRiskPct <= 6.0;
+    const isSlDistanceValid = !isPriceAboveStructure && alignedSL > alignedEntry && rawRiskPct >= 0.35 && rawRiskPct <= 6.0;
 
     checklist.push({
       id: 'check-8',
       label: 'Niveau d’invalidation logique (Stop Loss)',
       status: isSlDistanceValid ? 'PASSED' : 'FAILED',
-      comment: isSlDistanceValid
+      comment: isPriceAboveStructure
+        ? `Le prix actuel (${formatCryptoPrice(alignedEntry, tickSize)}) a déjà dépassé le sommet structurel (${formatCryptoPrice(timeframe15m?.recentHigh, tickSize)}). Structure vendeuse invalidée.`
+        : isSlDistanceValid
         ? `SL au-dessus du sommet structurel / OB à ${formatCryptoPrice(alignedSL, tickSize)} USDT (+${rawRiskPct.toFixed(2)}%). Distance saine.`
         : alignedSL <= alignedEntry
         ? `Erreur mathématique : le Stop Loss (${formatCryptoPrice(alignedSL, tickSize)}) ne peut être inférieur ou égal au prix d'entrée (${formatCryptoPrice(alignedEntry, tickSize)}).`
         : `Distance SL anormale (${rawRiskPct.toFixed(2)}%). Doit être comprise entre 0.35% et 6.0%.`,
     });
 
-    if (!isSlDistanceValid) {
+    if (isPriceAboveStructure) {
+      noTradeReasons.push(`Le prix d'entrée actuel est déjà au-dessus du sommet structurel 15M (${formatCryptoPrice(timeframe15m?.recentHigh, tickSize)}). Setup vendeur caduc.`);
+    } else if (!isSlDistanceValid) {
       noTradeReasons.push(`Stop Loss (${formatCryptoPrice(alignedSL, tickSize)}) invalide ou distance de risque (${rawRiskPct.toFixed(2)}%) hors limites.`);
     }
 
@@ -534,6 +546,8 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
       );
     }
 
+    const priceDecimals = Math.max(2, getDecimalsFromTickSize(tickSize));
+
     if (isSlDistanceValid && hierarchyCheck.isValid && isGrossRrValid && isNetRrValid) {
       setup = {
         direction: 'SHORT',
@@ -559,10 +573,10 @@ export function evaluateMarketSetup(input: EvaluationInput): EvaluationResult {
         grossGainPercentTP3: parseFloat(rr3.grossGainPct.toFixed(2)),
         netGainPercentTP3: parseFloat(rr3.netGainPct.toFixed(2)),
         riskPercent: parseFloat(rawRiskPct.toFixed(2)),
-        unitRisk: parseFloat(Math.abs(alignedSL - alignedEntry).toFixed(tickSize < 0.1 ? 6 : 2)),
-        unitGainTP1: parseFloat(Math.abs(alignedEntry - alignedTP1).toFixed(tickSize < 0.1 ? 6 : 2)),
-        unitGainTP2: parseFloat(Math.abs(alignedEntry - alignedTP2).toFixed(tickSize < 0.1 ? 6 : 2)),
-        unitGainTP3: alignedTP3 ? parseFloat(Math.abs(alignedEntry - alignedTP3).toFixed(tickSize < 0.1 ? 6 : 2)) : undefined,
+        unitRisk: parseFloat(Math.abs(alignedSL - alignedEntry).toFixed(priceDecimals)),
+        unitGainTP1: parseFloat(Math.abs(alignedEntry - alignedTP1).toFixed(priceDecimals)),
+        unitGainTP2: parseFloat(Math.abs(alignedEntry - alignedTP2).toFixed(priceDecimals)),
+        unitGainTP3: alignedTP3 ? parseFloat(Math.abs(alignedEntry - alignedTP3).toFixed(priceDecimals)) : undefined,
         estimatedFeesPercent: market === 'futures' ? 0.08 : 0.20,
         estimatedSlippagePercent: 0.05,
         confirmedTimeframes: [
