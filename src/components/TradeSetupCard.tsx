@@ -13,6 +13,7 @@ import {
   Info,
   Sliders,
   Sparkles,
+  Wallet,
 } from 'lucide-react';
 
 interface TradeSetupCardProps {
@@ -23,6 +24,7 @@ interface TradeSetupCardProps {
   noTradeReasons: string[];
   executiveSummary: string;
   onApplyToCalculator?: (setup: TradeSetup) => void;
+  onOpenPaperTrade?: (setup: TradeSetup) => void;
   onSaveToHistory?: () => void;
   onRunAiAudit?: () => void;
   isAiVerifying?: boolean;
@@ -38,6 +40,7 @@ export const TradeSetupCard: React.FC<TradeSetupCardProps> = ({
   noTradeReasons,
   executiveSummary,
   onApplyToCalculator,
+  onOpenPaperTrade,
   onSaveToHistory,
   onRunAiAudit,
   isAiVerifying,
@@ -484,7 +487,18 @@ Score de Qualité: ${qualityScore.total}/100 (${qualityScore.ratingLabel})
                 className="flex items-center gap-1.5 px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold shadow-md transition-colors"
               >
                 <Calculator className="w-3.5 h-3.5" />
-                Appliquer au Calculateur de Risque
+                Appliquer au Calculateur
+              </button>
+            )}
+
+            {setup && onOpenPaperTrade && (
+              <button
+                onClick={() => onOpenPaperTrade(setup)}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg text-xs font-semibold shadow-md transition-colors cursor-pointer"
+                title="Ouvrir cette opportunité en simulation Paper Trading"
+              >
+                <Wallet className="w-3.5 h-3.5" />
+                Ouvrir en Paper Trading
               </button>
             )}
 

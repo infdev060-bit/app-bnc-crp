@@ -26,6 +26,8 @@ import { MarketScanner } from './components/MarketScanner';
 import { NewsIntelligence } from './components/NewsIntelligence';
 import { NewsSentimentWidget } from './components/NewsSentimentWidget';
 import { AnalysisHistoryModal } from './components/AnalysisHistoryModal';
+import { PaperTradingDashboard } from './components/PaperTradingDashboard';
+import { usePaperTrading } from './hooks/usePaperTrading';
 import {
   Search,
   Activity,
@@ -46,6 +48,7 @@ import {
   WifiOff,
   Radar,
   Newspaper,
+  Wallet,
 } from 'lucide-react';
 
 const POPULAR_PAIRS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT', 'AVAXUSDT', 'SUIUSDT'];
@@ -54,7 +57,24 @@ export default function App() {
   const [symbol, setSymbol] = useState<string>('BTCUSDT');
   const [searchInput, setSearchInput] = useState<string>('BTCUSDT');
   const [market, setMarket] = useState<MarketType>('futures');
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'scanner' | 'news' | 'vision' | 'calculator' | 'backtest'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'scanner' | 'paper' | 'news' | 'vision' | 'calculator' | 'backtest'>('dashboard');
+
+  // Paper Trading Hook State
+  const {
+    config: paperConfig,
+    updateConfig: updatePaperConfig,
+    trades: paperTrades,
+    openPositions: paperOpenPositions,
+    closedTrades: paperClosedTrades,
+    accountState: paperAccountState,
+    stats: paperStats,
+    openManualTrade: openPaperManualTrade,
+    closeManualTrade: closePaperManualTrade,
+    processPriceUpdate: processPaperPriceUpdate,
+    autoIngestSignal: autoIngestPaperSignal,
+    resetAccount: resetPaperAccount,
+    clearClosedHistory: clearPaperClosedHistory,
+  } = usePaperTrading();
 
   // Real-time high-frequency WebSocket + REST stream with mobile lifecycle & race condition guards
   const {
@@ -437,6 +457,64 @@ export default function App() {
     setActiveTab('calculator');
   };
 
+  // Transfer setup to Paper Trading
+  const handleOpenPaperTrade = (setup: TradeSetup) => {
+    const res = openPaperManualTrade(setup);
+    setActiveTab('paper');
+  };
+
+  // Continuous real-time price updates into Paper Trading engine
+  useEffect(() => {
+    if (ticker && ticker.price > 0) {
+      processPaperPriceUpdate(
+        ticker.symbol,
+        ticker.market,
+        ticker.price,
+        Boolean(isStale || stalenessSeconds >= 25)
+      );
+    }
+  }, [ticker?.symbol, ticker?.market, ticker?.price, isStale, stalenessSeconds, processPaperPriceUpdate]);
+
+  // Auto-ingest signals if Paper Trading auto-monitoring is active
+  useEffect(() => {
+    if (
+      paperConfig.isAutoTradingActive &&
+      !paperConfig.isPaused &&
+      evaluation &&
+      evaluation.outcome !== 'NO_TRADE' &&
+      evaluation.setup &&
+      evaluation.qualityScore.total >= 65
+    ) {
+      autoIngestPaperSignal(evaluation.setup, evaluation.qualityScore.total);
+    }
+  }, [evaluation, paperConfig.isAutoTradingActive, paperConfig.isPaused, autoIngestPaperSignal]);
+
+  // Polling for other open positions that are not the currently selected active symbol
+  useEffect(() => {
+    if (paperOpenPositions.length === 0) return;
+    const interval = setInterval(async () => {
+      for (const pos of paperOpenPositions) {
+        if (pos.symbol === symbol && pos.market === market) continue;
+        try {
+          const endpoint = pos.market === 'futures'
+            ? `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${pos.symbol}`
+            : `https://api.binance.com/api/v3/ticker/price?symbol=${pos.symbol}`;
+          const res = await fetch(endpoint);
+          if (res.ok) {
+            const data = await res.json();
+            const p = parseFloat(data.price);
+            if (p > 0) {
+              processPaperPriceUpdate(pos.symbol, pos.market, p, false);
+            }
+          }
+        } catch {
+          // Ignore network glitch
+        }
+      }
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [paperOpenPositions, symbol, market, processPaperPriceUpdate]);
+
   // Save Setup to History
   const handleSaveToHistory = () => {
     if (!evaluation || !ticker) return;
@@ -729,7 +807,7 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('scanner')}
-              className={`py-3 px-3 border-b-2 flex items-center gap-2 transition-colors ${
+              className={`py-3 px-3 border-b-2 flex items-center gap-2 transition-colors cursor-pointer ${
                 activeTab === 'scanner'
                   ? 'border-blue-500 text-blue-400 font-semibold'
                   : 'border-transparent text-slate-400 hover:text-slate-200'
@@ -743,8 +821,27 @@ export default function App() {
             </button>
 
             <button
+              onClick={() => setActiveTab('paper')}
+              className={`py-3 px-3 border-b-2 flex items-center gap-2 transition-colors cursor-pointer ${
+                activeTab === 'paper'
+                  ? 'border-emerald-500 text-emerald-400 font-semibold'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Wallet className="w-4 h-4 text-emerald-400" />
+              <span>Paper Trading</span>
+              {paperOpenPositions.length > 0 ? (
+                <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono">
+                  {paperOpenPositions.length}
+                </span>
+              ) : paperConfig.isAutoTradingActive ? (
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" title="Surveillance active" />
+              ) : null}
+            </button>
+
+            <button
               onClick={() => setActiveTab('news')}
-              className={`py-3 px-3 border-b-2 flex items-center gap-2 transition-colors ${
+              className={`py-3 px-3 border-b-2 flex items-center gap-2 transition-colors cursor-pointer ${
                 activeTab === 'news'
                   ? 'border-blue-500 text-blue-400 font-semibold'
                   : 'border-transparent text-slate-400 hover:text-slate-200'
@@ -872,6 +969,7 @@ export default function App() {
                   noTradeReasons={evaluation.noTradeReasons}
                   executiveSummary={evaluation.executiveSummary}
                   onApplyToCalculator={handleApplyToCalculator}
+                  onOpenPaperTrade={handleOpenPaperTrade}
                   onSaveToHistory={handleSaveToHistory}
                   onRunAiAudit={runAiDeepAnalysis}
                   isAiVerifying={isAiVerifying}
@@ -906,6 +1004,32 @@ export default function App() {
             <MarketScanner
               currentMarket={market}
               onSelectPair={handleSelectFromScanner}
+              onOpenPaperTrade={(s) => {
+                const res = openPaperManualTrade(s);
+                if (res.success) setActiveTab('paper');
+              }}
+            />
+          </div>
+        )}
+
+        {/* Tab: Paper Trading Virtuel */}
+        {activeTab === 'paper' && (
+          <div className="space-y-5">
+            <PaperTradingDashboard
+              accountState={paperAccountState}
+              stats={paperStats}
+              openPositions={paperOpenPositions}
+              closedTrades={paperClosedTrades}
+              config={paperConfig}
+              onUpdateConfig={updatePaperConfig}
+              onCloseManualTrade={closePaperManualTrade}
+              onResetAccount={resetPaperAccount}
+              onClearClosedHistory={clearPaperClosedHistory}
+              onSelectPair={(pSym, pMkt) => {
+                setSymbol(pSym);
+                setMarket(pMkt);
+                setActiveTab('dashboard');
+              }}
             />
           </div>
         )}

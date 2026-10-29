@@ -29,11 +29,14 @@ import {
   Percent,
   Check,
   AlertTriangle,
+  Wallet,
 } from 'lucide-react';
+import { TradeSetup } from '../types/crypto';
 
 interface MarketScannerProps {
   currentMarket: MarketType;
   onSelectPair: (symbol: string, market: MarketType) => void;
+  onOpenPaperTrade?: (setup: TradeSetup, score?: number) => void;
 }
 
 type CategoryTab = 'best_long' | 'best_short' | 'watchlist' | 'all';
@@ -41,6 +44,7 @@ type CategoryTab = 'best_long' | 'best_short' | 'watchlist' | 'all';
 export const MarketScanner: React.FC<MarketScannerProps> = ({
   currentMarket,
   onSelectPair,
+  onOpenPaperTrade,
 }) => {
   // Scanner configuration state
   const [selectedMarket, setSelectedMarket] = useState<MarketType>(currentMarket);
@@ -819,6 +823,18 @@ export const MarketScanner: React.FC<MarketScannerProps> = ({
                       >
                         <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-blue-400' : ''}`} />
                       </button>
+
+                      {/* Direct Paper Trading Button if setup exists */}
+                      {hasSetup && item.setup && onOpenPaperTrade && (
+                        <button
+                          onClick={() => onOpenPaperTrade(item.setup!, item.qualityScore.total)}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-800 hover:bg-emerald-700 text-white font-medium text-xs flex items-center gap-1.5 shadow-md shadow-emerald-950/50 transition-all cursor-pointer"
+                          title="Ouvrir directement cette opportunité en Paper Trading simulé"
+                        >
+                          <Wallet className="w-3.5 h-3.5 text-emerald-300" />
+                          <span>Simuler</span>
+                        </button>
+                      )}
 
                       {/* Select Pair Action Button */}
                       <button
