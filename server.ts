@@ -1052,8 +1052,10 @@ app.get('/api/market/ticker', async (req, res) => {
 app.get('/api/market/klines', async (req, res) => {
   const symbol = ((req.query.symbol as string) || 'BTCUSDT').toUpperCase().replace(/[^A-Z0-9]/g, '');
   const interval = (req.query.interval as string) || '1h'; // 5m, 15m, 1h, 4h, 1d
-  const limit = Math.min(parseInt(req.query.limit as string, 10) || 80, 200);
+  const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 80, 5), 1000);
   const market = (req.query.market as string) === 'futures' ? 'futures' : 'spot';
+  const startTimeParam = req.query.startTime ? `&startTime=${req.query.startTime}` : '';
+  const endTimeParam = req.query.endTime ? `&endTime=${req.query.endTime}` : '';
 
   // 1. Validate symbol against official Exchange Info before requesting Binance API
   const validation = await validateMarketSymbol(symbol, market);
@@ -1072,8 +1074,8 @@ app.get('/api/market/klines', async (req, res) => {
   }
 
   const endpoint = market === 'futures'
-    ? `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
-    : `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+    ? `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}${startTimeParam}${endTimeParam}`
+    : `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}${startTimeParam}${endTimeParam}`;
 
   try {
     const controller = new AbortController();

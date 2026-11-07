@@ -77,14 +77,22 @@ export interface PaperTrade {
   totalFeesPaid: number;
   totalFundingPaid: number;
 
+  // Granular Cost Breakdown
+  totalEntryFeePaid?: number;
+  totalExitFeePaid?: number;
+  totalSlippagePaid?: number;
+  totalCostsPaid?: number;
+
   // Exit information
   closeTime?: number;
   finalExitPrice?: number;
   exitReason?: string;
 
-  // Strategy flags
+  // Strategy & Reconciliation flags
   breakEvenMoved: boolean;
   breakEvenPrice?: number;
+  isReconciledOffline?: boolean;
+  reconciliationNotes?: string;
 }
 
 export interface PaperAccountConfig {

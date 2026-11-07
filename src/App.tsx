@@ -74,6 +74,9 @@ export default function App() {
     autoIngestSignal: autoIngestPaperSignal,
     resetAccount: resetPaperAccount,
     clearClosedHistory: clearPaperClosedHistory,
+    isReconciling: isPaperReconciling,
+    reconciliationStatus: paperReconciliationStatus,
+    reconcileOfflineTrades: reconcilePaperOfflineTrades,
   } = usePaperTrading();
 
   // Real-time high-frequency WebSocket + REST stream with mobile lifecycle & race condition guards
@@ -1025,6 +1028,9 @@ export default function App() {
               onCloseManualTrade={closePaperManualTrade}
               onResetAccount={resetPaperAccount}
               onClearClosedHistory={clearPaperClosedHistory}
+              isReconciling={isPaperReconciling}
+              reconciliationStatus={paperReconciliationStatus}
+              onReconcileOffline={reconcilePaperOfflineTrades}
               onSelectPair={(pSym, pMkt) => {
                 setSymbol(pSym);
                 setMarket(pMkt);

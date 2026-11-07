@@ -21,11 +21,14 @@ import {
   calculateAccountState,
   calculatePaperTradingStats,
 } from '../utils/paperTradingEngine';
+import { reconcileTradeWithKlines } from '../utils/paperTradingReconciliation';
 
 export function usePaperTrading() {
   const [config, setConfig] = useState<PaperAccountConfig>(DEFAULT_PAPER_CONFIG);
   const [trades, setTrades] = useState<PaperTrade[]>([]);
   const [isLoaded, setIsLoaded] = useState<boolean>(false);
+  const [isReconciling, setIsReconciling] = useState<boolean>(false);
+  const [reconciliationStatus, setReconciliationStatus] = useState<string | null>(null);
 
   // In-memory set of recently registered signals to prevent rapid duplicate opens
   const recentlyRegisteredSignals = useRef<Set<string>>(new Set());
@@ -49,6 +52,16 @@ export function usePaperTrading() {
             if (t.currentQuantity > 0) {
               recentlyRegisteredSignals.current.add(`${t.market}:${t.symbol}`);
             }
+          }
+
+          // Automatic offline reconciliation if open positions were inactive
+          const hasStaleOpenPositions = savedTrades.some(
+            (t) => t.currentQuantity > 0 && Date.now() - t.lastPriceUpdate > 60000
+          );
+          if (hasStaleOpenPositions) {
+            setTimeout(() => {
+              reconcileOfflineTrades();
+            }, 1000);
           }
         }
       } catch (err) {
@@ -95,8 +108,8 @@ export function usePaperTrading() {
   }, [trades, config]);
 
   const stats: PaperTradingStats = useMemo(() => {
-    return calculatePaperTradingStats(trades);
-  }, [trades]);
+    return calculatePaperTradingStats(trades, config.initialCapital);
+  }, [trades, config.initialCapital]);
 
   const openPositions = useMemo(() => {
     return trades.filter((t) => t.currentQuantity > 0 && t.status !== 'SL_HIT' && t.status !== 'TP3_HIT' && t.status !== 'MANUAL_CLOSED');
@@ -106,7 +119,66 @@ export function usePaperTrading() {
     return trades.filter((t) => t.currentQuantity <= 0 || t.status === 'SL_HIT' || t.status === 'TP3_HIT' || t.status === 'MANUAL_CLOSED');
   }, [trades]);
 
-  // Open manual trade from setup
+  // Offline Historical Klines Reconciliation
+  const reconcileOfflineTrades = useCallback(async () => {
+    const currentTrades = tradesRef.current;
+    const openList = currentTrades.filter((t) => t.currentQuantity > 0 && t.status !== 'SL_HIT' && t.status !== 'TP3_HIT' && t.status !== 'MANUAL_CLOSED');
+    if (openList.length === 0) {
+      setReconciliationStatus('Aucune position ouverte à réconcilier.');
+      return;
+    }
+
+    setIsReconciling(true);
+    setReconciliationStatus(`Réconciliation de ${openList.length} position(s) ouverte(s)...`);
+    let totalFills = 0;
+    let closedCount = 0;
+
+    try {
+      const updatedList = [...currentTrades];
+
+      for (let i = 0; i < updatedList.length; i++) {
+        const trade = updatedList[i];
+        if (trade.currentQuantity <= 0 || trade.status === 'SL_HIT' || trade.status === 'TP3_HIT' || trade.status === 'MANUAL_CLOSED') {
+          continue;
+        }
+
+        const now = Date.now();
+        // If trade last update was more than 60 seconds ago, fetch missed klines
+        if (now - trade.lastPriceUpdate > 60000) {
+          try {
+            const startParam = trade.lastPriceUpdate ? `&startTime=${trade.lastPriceUpdate}` : '';
+            const res = await fetch(`/api/market/klines?symbol=${trade.symbol}&interval=1m${startParam}&limit=500&market=${trade.market}`);
+            if (res.ok) {
+              const data = await res.json();
+              if (data.klines && Array.isArray(data.klines) && data.klines.length > 0) {
+                const rec = reconcileTradeWithKlines(trade, data.klines, configRef.current);
+                updatedList[i] = rec.trade;
+                totalFills += rec.reconciledFillsCount;
+                if (rec.wasClosed) {
+                  closedCount++;
+                  recentlyRegisteredSignals.current.delete(`${trade.market}:${trade.symbol}`);
+                }
+              }
+            }
+          } catch (err) {
+            console.warn(`[Reconciliation] Erreur sur ${trade.symbol}:`, err);
+          }
+        }
+      }
+
+      setTrades(updatedList);
+      tradesRef.current = updatedList;
+      savePaperTradesToStorage(updatedList);
+      setReconciliationStatus(`Réconciliation terminée : ${totalFills} exécution(s), ${closedCount} clôture(s).`);
+    } catch (err: any) {
+      console.error('[Reconciliation] Erreur globale:', err);
+      setReconciliationStatus(`Erreur de réconciliation : ${err?.message || 'Erreur réseau'}`);
+    } finally {
+      setIsReconciling(false);
+    }
+  }, []);
+
+  // Open manual trade from setup with portfolio equity sizing
   const openManualTrade = useCallback(
     (setup: TradeSetup): { success: boolean; message: string } => {
       if (!setup || setup.direction === 'NO_TRADE') {
@@ -130,9 +202,19 @@ export function usePaperTrading() {
         };
       }
 
-      const newTrade = createPaperTradeFromSetup(setup, accountState.availableBalance, config);
+      // Sizing capital: Total Portfolio Equity (floored at config.initialCapital)
+      const sizingCapital = accountState.equity > 0 ? accountState.equity : config.initialCapital;
+      const newTrade = createPaperTradeFromSetup(setup, sizingCapital, config);
       if (!newTrade) {
-        return { success: false, message: 'Fonds disponibles insuffisants ou calcul de quantité invalide.' };
+        return { success: false, message: 'Calcul de quantité invalide ou géométrie de prix non conforme.' };
+      }
+
+      // Ensure available margin is sufficient
+      if (newTrade.marginUsedUsd > accountState.availableBalance) {
+        return {
+          success: false,
+          message: `Marge disponible insuffisante (${accountState.availableBalance.toFixed(2)}$ disponibles, ${newTrade.marginUsedUsd.toFixed(2)}$ requis).`,
+        };
       }
 
       setTrades((prev) => [newTrade, ...prev]);
@@ -141,7 +223,7 @@ export function usePaperTrading() {
 
       return { success: true, message: `Position simulée ${setup.direction} sur ${setup.pair} ouverte avec succès.` };
     },
-    [openPositions, config, accountState.availableBalance, persistState]
+    [openPositions, config, accountState.equity, accountState.availableBalance, persistState]
   );
 
   // Auto Ingest Signal from Scanner / Dashboard
@@ -156,8 +238,11 @@ export function usePaperTrading() {
 
       if (openPositions.length >= config.maxOpenPositions) return false;
 
-      const newTrade = createPaperTradeFromSetup(setup, accountState.availableBalance, config);
+      const sizingCapital = accountState.equity > 0 ? accountState.equity : config.initialCapital;
+      const newTrade = createPaperTradeFromSetup(setup, sizingCapital, config);
       if (!newTrade) return false;
+
+      if (newTrade.marginUsedUsd > accountState.availableBalance) return false;
 
       newTrade.qualityScore = score;
       setTrades((prev) => [newTrade, ...prev]);
@@ -165,7 +250,7 @@ export function usePaperTrading() {
       persistState();
       return true;
     },
-    [config, openPositions.length, accountState.availableBalance, persistState]
+    [config, openPositions.length, accountState.equity, accountState.availableBalance, persistState]
   );
 
   // Manual Close Trade
@@ -262,5 +347,8 @@ export function usePaperTrading() {
     autoIngestSignal,
     resetAccount,
     clearClosedHistory,
+    isReconciling,
+    reconciliationStatus,
+    reconcileOfflineTrades,
   };
 }

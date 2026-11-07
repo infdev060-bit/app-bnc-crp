@@ -87,11 +87,16 @@ export function createPaperTradeFromSetup(
     partialFills: [],
 
     realizedGrossPnl: 0,
-    realizedNetPnl: -entryFeePaid, // Entry fee debited at start
+    realizedNetPnl: 0, // Realized P&L is 0 at creation; unclosed entry fee is in unrealizedNetPnl
     unrealizedGrossPnl: 0,
-    unrealizedNetPnl: 0,
+    unrealizedNetPnl: -entryFeePaid, // Marked down by entry fee until realized
     totalFeesPaid: entryFeePaid,
     totalFundingPaid: 0,
+
+    totalEntryFeePaid: entryFeePaid,
+    totalExitFeePaid: 0,
+    totalSlippagePaid: 0,
+    totalCostsPaid: entryFeePaid,
 
     breakEvenMoved: false,
   };
@@ -275,8 +280,11 @@ function executePartialTakeProfit(
   trade.currentQuantity = fill.remainingQuantity;
   trade.realizedGrossPnl += grossPnl;
   trade.realizedNetPnl += netPnl;
-  trade.totalFeesPaid += exitFee;
-  trade.totalFundingPaid += fundingFee;
+  trade.totalExitFeePaid = (trade.totalExitFeePaid || 0) + exitFee;
+  trade.totalSlippagePaid = (trade.totalSlippagePaid || 0) + slippageFee;
+  trade.totalFundingPaid = (trade.totalFundingPaid || 0) + fundingFee;
+  trade.totalFeesPaid = (trade.totalEntryFeePaid || trade.entryFeePaid) + trade.totalExitFeePaid;
+  trade.totalCostsPaid = trade.totalFeesPaid + trade.totalSlippagePaid + trade.totalFundingPaid;
 }
 
 /**
@@ -334,8 +342,11 @@ function executeFullStopLoss(trade: PaperTrade, marketPrice: number, reason: str
 
   trade.realizedGrossPnl += grossPnl;
   trade.realizedNetPnl += netPnl;
-  trade.totalFeesPaid += exitFee;
-  trade.totalFundingPaid += fundingFee;
+  trade.totalExitFeePaid = (trade.totalExitFeePaid || 0) + exitFee;
+  trade.totalSlippagePaid = (trade.totalSlippagePaid || 0) + slippageFee;
+  trade.totalFundingPaid = (trade.totalFundingPaid || 0) + fundingFee;
+  trade.totalFeesPaid = (trade.totalEntryFeePaid || trade.entryFeePaid) + trade.totalExitFeePaid;
+  trade.totalCostsPaid = trade.totalFeesPaid + trade.totalSlippagePaid + trade.totalFundingPaid;
 
   trade.unrealizedGrossPnl = 0;
   trade.unrealizedNetPnl = 0;
@@ -390,7 +401,10 @@ export function manualClosePaperTrade(trade: PaperTrade, currentPrice: number): 
 
   updated.realizedGrossPnl += grossPnl;
   updated.realizedNetPnl += netPnl;
-  updated.totalFeesPaid += exitFee;
+  updated.totalExitFeePaid = (updated.totalExitFeePaid || 0) + exitFee;
+  updated.totalSlippagePaid = (updated.totalSlippagePaid || 0) + slippageFee;
+  updated.totalFeesPaid = (updated.totalEntryFeePaid || updated.entryFeePaid) + updated.totalExitFeePaid;
+  updated.totalCostsPaid = updated.totalFeesPaid + updated.totalSlippagePaid + (updated.totalFundingPaid || 0);
 
   updated.unrealizedGrossPnl = 0;
   updated.unrealizedNetPnl = 0;
@@ -412,11 +426,13 @@ function computeUnrealizedPnl(trade: PaperTrade): PaperTrade {
   const unitPnl = isLong ? trade.currentMarketPrice - trade.entryPrice : trade.entryPrice - trade.currentMarketPrice;
   const grossUnrealized = trade.currentQuantity * unitPnl;
 
+  const remainingFraction = trade.initialQuantity > 0 ? trade.currentQuantity / trade.initialQuantity : 1;
+  const unamortizedEntryFee = trade.entryFeePaid * remainingFraction;
   const estimatedExitFee = (trade.currentQuantity * trade.currentMarketPrice) * (trade.feeRatePercent / 100);
   const estimatedSlippage = (trade.currentQuantity * trade.currentMarketPrice) * (trade.slippagePercent / 100);
 
   trade.unrealizedGrossPnl = grossUnrealized;
-  trade.unrealizedNetPnl = grossUnrealized - estimatedExitFee - estimatedSlippage;
+  trade.unrealizedNetPnl = grossUnrealized - unamortizedEntryFee - estimatedExitFee - estimatedSlippage;
 
   return trade;
 }
@@ -486,7 +502,7 @@ export function calculateAccountState(
 /**
  * Computes comprehensive Paper Trading Statistics strictly on fully closed trades
  */
-export function calculatePaperTradingStats(trades: PaperTrade[]): PaperTradingStats {
+export function calculatePaperTradingStats(trades: PaperTrade[], initialCapital: number = 10000): PaperTradingStats {
   const closedTrades = trades.filter(
     (t) => t.currentQuantity <= 0 || t.status === 'SL_HIT' || t.status === 'TP3_HIT' || t.status === 'MANUAL_CLOSED'
   );
@@ -537,8 +553,9 @@ export function calculatePaperTradingStats(trades: PaperTrade[]): PaperTradingSt
   }
 
   // Equity curve and Max Drawdown calculation
-  let runningEquity = 10000;
-  let peakEquity = 10000;
+  const safeInitialCapital = initialCapital > 0 ? initialCapital : 10000;
+  let runningEquity = safeInitialCapital;
+  let peakEquity = safeInitialCapital;
   let maxDrawdownPercent = 0;
 
   for (const t of closedTrades) {
@@ -548,7 +565,7 @@ export function calculatePaperTradingStats(trades: PaperTrade[]): PaperTradingSt
     if (currentDd > maxDrawdownPercent) maxDrawdownPercent = currentDd;
   }
 
-  const netCumulativeReturnPercent = ((runningEquity - 10000) / 10000) * 100;
+  const netCumulativeReturnPercent = ((runningEquity - safeInitialCapital) / safeInitialCapital) * 100;
 
   // Breakdown by Symbol
   const performanceBySymbol: Record<string, { trades: number; winRate: number; netPnl: number }> = {};

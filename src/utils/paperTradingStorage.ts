@@ -257,33 +257,49 @@ export function exportPaperTradesToCSV(trades: PaperTrade[]): string {
     'Quantité Restante',
     'P&L Brut ($)',
     'P&L Net ($)',
-    'Frais Payés ($)',
+    'Frais Entrée ($)',
+    'Frais Sortie ($)',
+    'Slippage ($)',
+    'Funding ($)',
+    'Coûts Totaux ($)',
     'Score Confluence',
     'Motif Clôture',
   ];
 
-  const rows = trades.map((t) => [
-    t.id,
-    new Date(t.entryTime).toISOString(),
-    t.closeTime ? new Date(t.closeTime).toISOString() : 'EN COURS',
-    t.symbol,
-    t.market,
-    t.direction,
-    t.status,
-    t.entryPrice.toFixed(6),
-    t.finalExitPrice ? t.finalExitPrice.toFixed(6) : '',
-    t.initialStopLoss.toFixed(6),
-    t.takeProfit1.toFixed(6),
-    t.takeProfit2.toFixed(6),
-    t.takeProfit3 ? t.takeProfit3.toFixed(6) : '',
-    t.initialQuantity.toFixed(4),
-    t.currentQuantity.toFixed(4),
-    t.realizedGrossPnl.toFixed(2),
-    t.realizedNetPnl.toFixed(2),
-    t.totalFeesPaid.toFixed(2),
-    t.qualityScore.toString(),
-    `"${(t.exitReason || '').replace(/"/g, '""')}"`,
-  ]);
+  const rows = trades.map((t) => {
+    const entryFee = t.totalEntryFeePaid ?? t.entryFeePaid ?? 0;
+    const exitFee = t.totalExitFeePaid ?? Math.max(0, (t.totalFeesPaid || 0) - entryFee);
+    const slippageCost = t.totalSlippagePaid ?? t.partialFills.reduce((acc, f) => acc + (f.slippagePaid || 0), 0);
+    const fundingCost = t.totalFundingPaid ?? t.partialFills.reduce((acc, f) => acc + (f.fundingPaid || 0), 0);
+    const totalCosts = t.totalCostsPaid ?? (entryFee + exitFee + slippageCost + fundingCost);
+
+    return [
+      t.id,
+      new Date(t.entryTime).toISOString(),
+      t.closeTime ? new Date(t.closeTime).toISOString() : 'EN COURS',
+      t.symbol,
+      t.market,
+      t.direction,
+      t.status,
+      t.entryPrice.toFixed(6),
+      t.finalExitPrice ? t.finalExitPrice.toFixed(6) : '',
+      t.initialStopLoss.toFixed(6),
+      t.takeProfit1.toFixed(6),
+      t.takeProfit2.toFixed(6),
+      t.takeProfit3 ? t.takeProfit3.toFixed(6) : '',
+      t.initialQuantity.toFixed(4),
+      t.currentQuantity.toFixed(4),
+      t.realizedGrossPnl.toFixed(2),
+      t.realizedNetPnl.toFixed(2),
+      entryFee.toFixed(4),
+      exitFee.toFixed(4),
+      slippageCost.toFixed(4),
+      fundingCost.toFixed(4),
+      totalCosts.toFixed(2),
+      t.qualityScore.toString(),
+      `"${(t.exitReason || '').replace(/"/g, '""')}"`,
+    ];
+  });
 
   return [headers.join(';'), ...rows.map((r) => r.join(';'))].join('\n');
 }

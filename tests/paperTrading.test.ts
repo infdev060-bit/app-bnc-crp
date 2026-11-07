@@ -86,9 +86,10 @@ describe('SUITE DE TESTS COMPLÈTE : PAPER TRADING VIRTUEL (Crypto Edge AI v3.8 
     assert.ok(Math.abs(trade.initialQuantity - expectedQty) < 1e-6);
     assert.strictEqual(trade.currentQuantity, trade.initialQuantity);
 
-    // Entry fee debited immediately
+    // Entry fee recorded and marked down in unrealized PnL at creation
     assert.ok(trade.entryFeePaid > 0, 'Les frais d\'entrée doivent être calculés');
-    assert.strictEqual(trade.realizedNetPnl, -trade.entryFeePaid);
+    assert.strictEqual(trade.realizedNetPnl, 0, 'Le P&L réalisé démarre à 0 tant qu\'aucune fraction n\'est clôturée');
+    assert.strictEqual(trade.unrealizedNetPnl, -trade.entryFeePaid, 'Le P&L non réalisé intègre les frais d\'entrée payés');
   });
 
   // 2. LONG P&L Calculation with Full Exit
@@ -202,7 +203,7 @@ describe('SUITE DE TESTS COMPLÈTE : PAPER TRADING VIRTUEL (Crypto Edge AI v3.8 
     assert.strictEqual(accountState.initialCapital, 10000);
     assert.strictEqual(accountState.openPositionsCount, 1);
     assert.ok(accountState.marginLocked > 0, 'La marge doit être bloquée');
-    assert.strictEqual(accountState.availableBalance, 10000 - trade.entryFeePaid - accountState.marginLocked);
+    assert.strictEqual(accountState.availableBalance, 10000 - accountState.marginLocked);
   });
 
   // 9. Statistics on fully closed trades only
@@ -218,7 +219,7 @@ describe('SUITE DE TESTS COMPLÈTE : PAPER TRADING VIRTUEL (Crypto Edge AI v3.8 
       63000
     );
 
-    const stats = calculatePaperTradingStats([openTrade, closedWinner, closedLoser]);
+    const stats = calculatePaperTradingStats([openTrade, closedWinner, closedLoser], 10000);
 
     assert.strictEqual(stats.totalClosedTrades, 2, 'Seuls les trades clôturés doivent être comptabilisés');
     assert.strictEqual(stats.winningTrades, 1);
@@ -230,7 +231,7 @@ describe('SUITE DE TESTS COMPLÈTE : PAPER TRADING VIRTUEL (Crypto Edge AI v3.8 
   });
 
   // 10. CSV & JSON Export
-  it('10. Export intègre et déterministe en CSV et JSON', () => {
+  it('10. Export intègre et déterministe en CSV et JSON avec colonnes de coûts distinctes', () => {
     const trade = manualClosePaperTrade(
       createPaperTradeFromSetup(sampleLongSetup, 10000, DEFAULT_PAPER_CONFIG)!,
       66000
@@ -240,6 +241,11 @@ describe('SUITE DE TESTS COMPLÈTE : PAPER TRADING VIRTUEL (Crypto Edge AI v3.8 
     assert.ok(csv.includes('BTCUSDT'), 'Le CSV doit contenir le symbole');
     assert.ok(csv.includes('MANUAL_CLOSED'), 'Le CSV doit contenir le statut');
     assert.ok(csv.includes('LONG'), 'Le CSV doit contenir la direction');
+    assert.ok(csv.includes('Frais Entrée ($)'), 'Le CSV doit contenir la colonne Frais Entrée');
+    assert.ok(csv.includes('Frais Sortie ($)'), 'Le CSV doit contenir la colonne Frais Sortie');
+    assert.ok(csv.includes('Slippage ($)'), 'Le CSV doit contenir la colonne Slippage');
+    assert.ok(csv.includes('Funding ($)'), 'Le CSV doit contenir la colonne Funding');
+    assert.ok(csv.includes('Coûts Totaux ($)'), 'Le CSV doit contenir la colonne Coûts Totaux');
 
     const jsonStr = exportPaperTradesToJSON([trade], DEFAULT_PAPER_CONFIG);
     const parsed = JSON.parse(jsonStr);
@@ -249,9 +255,109 @@ describe('SUITE DE TESTS COMPLÈTE : PAPER TRADING VIRTUEL (Crypto Edge AI v3.8 
 
   // 11. Zero Real Binance Order Execution Verification
   it('11. SÉCURITÉ ABSOLUE : Zéro appel d\'API d\'ordre réel vers Binance', () => {
-    // Audit statique et dynamique : l'application n'utilise aucune clé d'ordre (API-KEY, secret)
-    // et ne cible aucun endpoint privé (/api/v3/order, /fapi/v1/order)
     const trade = createPaperTradeFromSetup(sampleLongSetup, 10000, DEFAULT_PAPER_CONFIG)!;
     assert.ok(trade.id.startsWith('pt-'), 'L\'identifiant de transaction est préfixé strictement pt- (paper trade)');
+  });
+
+  // 12. AUDIT ANOMALIE 1 : Dimensionnement exact de position (10 000 USDT vs 100 USDT)
+  it('12. Audit Anomalie 1 : Risque monétaire exact de 50.00$ avec capital 10 000 USDT vs 0.50$ avec capital 100 USDT', () => {
+    // Sizing with 10 000 USDT portfolio equity
+    const trade10k = createPaperTradeFromSetup(sampleLongSetup, 10000, DEFAULT_PAPER_CONFIG)!;
+    assert.strictEqual(trade10k.allocatedRiskUsd, 50.00, 'Pour 10 000$ et 0.5% de risque, le risque doit être exactement 50.00$');
+
+    // Sizing with 100 USDT old capital configuration
+    const config100 = { ...DEFAULT_PAPER_CONFIG, initialCapital: 100 };
+    const trade100 = createPaperTradeFromSetup(sampleLongSetup, 100, config100)!;
+    assert.strictEqual(trade100.allocatedRiskUsd, 0.50, 'Pour 100$ et 0.5% de risque, le risque est de 0.50$ (reproduction de l\'anomalie observée)');
+
+    // Verification of theoretical risk amounts observed in the user CSV
+    // ETH with ~97.54$ available balance: 97.54 * 0.005 = 0.4877$
+    const tradeEthSim = createPaperTradeFromSetup(sampleShortSetup, 97.54, config100)!;
+    assert.ok(Math.abs(tradeEthSim.allocatedRiskUsd - 0.4877) < 0.001, 'Démontre que 0.4877$ provient de 0.5% sur un solde disponible proche de 97.54$');
+  });
+
+  // 13. AUDIT ANOMALIE 2 : Déduction unique et exacte des frais et du P&L sans double comptage
+  it('13. Audit Anomalie 2 : Déduction unique de chaque coût (P&L Brut - Coûts Totaux = P&L Net)', () => {
+    let trade = createPaperTradeFromSetup(sampleLongSetup, 10000, DEFAULT_PAPER_CONFIG)!;
+    const initialEntryFee = trade.entryFeePaid;
+
+    // Simulate Stop Loss hit at 63700 (Loss)
+    trade = updateTradeWithCurrentPrice(trade, 63700, Date.now(), false, DEFAULT_PAPER_CONFIG);
+    assert.strictEqual(trade.status, 'SL_HIT');
+
+    // Net PnL must strictly equal: Gross PnL - (Entry Fee + Exit Fee + Slippage + Funding)
+    const expectedCosts = trade.entryFeePaid + (trade.totalExitFeePaid || 0) + (trade.totalSlippagePaid || 0) + (trade.totalFundingPaid || 0);
+    const calculatedDiff = trade.realizedGrossPnl - trade.realizedNetPnl;
+
+    assert.ok(Math.abs(calculatedDiff - expectedCosts) < 1e-6, `La différence Brut - Net (${calculatedDiff.toFixed(4)}$) doit égaler exactement les coûts totaux (${expectedCosts.toFixed(4)}$) sans double déduction`);
+  });
+
+  // 14. AUDIT ANOMALIE 3 : Position SOL en statut TP1_HIT
+  it('14. Audit Anomalie 3 : Position en statut TP1_HIT conserve 50% de sa taille sans clôture automatique prématurée', () => {
+    const solSetup: TradeSetup = {
+      direction: 'LONG',
+      pair: 'SOLUSDT',
+      market: 'futures',
+      entryPrice: 180,
+      entryZone: '179 - 181 USDT',
+      stopLoss: 172,
+      invalidationCondition: 'Clôture 15M sous 172$',
+      takeProfit1: 192,
+      takeProfit2: 204,
+      takeProfit3: 216,
+      riskRewardRatioTP1: 1.5,
+      riskRewardRatioTP2: 3.0,
+      riskRewardRatioTP3: 4.5,
+      netRiskRewardRatioTP1: 1.45,
+      netRiskRewardRatioTP2: 2.92,
+      grossGainPercentTP1: 6.67,
+      netGainPercentTP1: 6.55,
+      riskPercent: 4.44,
+      suggestedRiskPercent: 0.5,
+      tickSize: 0.01,
+      keyConfluences: ['Rebond Order Block 4H'],
+      mainRisks: ['Rejet résistance 195$'],
+      dataTimestamp: Date.now(),
+    };
+
+    let solTrade = createPaperTradeFromSetup(solSetup, 10000, DEFAULT_PAPER_CONFIG)!;
+    const initialQty = solTrade.initialQuantity;
+
+    // Trigger TP1 at 192
+    solTrade = updateTradeWithCurrentPrice(solTrade, 192, Date.now(), false, DEFAULT_PAPER_CONFIG);
+
+    assert.strictEqual(solTrade.status, 'TP1_HIT');
+    assert.strictEqual(solTrade.partialFills.length, 1);
+    assert.strictEqual(solTrade.currentQuantity, initialQty * 0.5, 'La quantité restante doit être exactement 50%');
+    assert.ok(solTrade.realizedNetPnl > 0, 'Le P&L net réalisé de TP1 doit être positif');
+
+    // Price retraces to 185 (above SL 172)
+    solTrade = updateTradeWithCurrentPrice(solTrade, 185, Date.now(), false, DEFAULT_PAPER_CONFIG);
+    assert.strictEqual(solTrade.status, 'TP1_HIT', 'La position doit rester ouverte en statut TP1_HIT');
+    assert.strictEqual(solTrade.currentQuantity, initialQty * 0.5);
+    assert.ok(solTrade.unrealizedGrossPnl > 0, 'Le P&L non réalisé doit être calculé sur les 50% restants');
+  });
+
+  // 15. AUDIT ANOMALIE 4 : Réconciliation hors-ligne à partir des bougies Binance
+  it('15. Audit Anomalie 4 : Réconciliation des bougies manquées pendant l\'inactivité du navigateur', async () => {
+    const { reconcileTradeWithKlines } = await import('../src/utils/paperTradingReconciliation');
+
+    const trade = createPaperTradeFromSetup(sampleLongSetup, 10000, DEFAULT_PAPER_CONFIG)!;
+    trade.lastPriceUpdate = Date.now() - 3600000; // Simule une absence d'une heure
+
+    // Missed candles simulation
+    const simulatedKlines = [
+      { time: Date.now() - 3000000, open: 65000, high: 65500, low: 64800, close: 65200 },
+      { time: Date.now() - 2400000, open: 65200, high: 67100, low: 65100, close: 66900 }, // Touche TP1 (66950)
+      { time: Date.now() - 1800000, open: 66900, high: 67200, low: 63500, close: 63600 }, // Touche SL (63700)
+    ];
+
+    const result = reconcileTradeWithKlines(trade, simulatedKlines, DEFAULT_PAPER_CONFIG);
+
+    assert.strictEqual(result.wasClosed, true, 'Le trade doit avoir été clôturé');
+    assert.strictEqual(result.reconciledFillsCount, 2, 'Doit avoir réconcilié TP1 puis SL');
+    assert.strictEqual(result.trade.status, 'SL_HIT');
+    assert.strictEqual(result.trade.currentQuantity, 0);
+    assert.ok(result.trade.isReconciledOffline, 'Le flag isReconciledOffline doit être actif');
   });
 });
